@@ -15,6 +15,9 @@ unet_detector:
     val_split: "data/splits/val.json"
     batch_size: 4                  # Reduced from 8 for T4
     num_workers: 2                 # Reduced from 4 for 15GB RAM
+    image_size: [512, 512]
+    resize_mode: "resize"  
+
     
   training:
     epochs: 100

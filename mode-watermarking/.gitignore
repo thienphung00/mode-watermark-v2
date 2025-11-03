@@ -31,6 +31,7 @@ wheels/
 # Data
 data/raw/*
 data/generated/*
+data/coco/annotations/*.json  # Large COCO annotation files (can be regenerated)
 *.jpg
 *.png
 *.jpeg
