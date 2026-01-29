@@ -77,6 +77,14 @@ def create_app() -> FastAPI:
     # Include routes
     app.include_router(router)
     
+    # Mount static files for generated images
+    # Images saved to storage_path will be accessible at /images/<filename>
+    from pathlib import Path
+    config = get_config()
+    images_path = Path(config.storage_path)
+    images_path.mkdir(parents=True, exist_ok=True)
+    app.mount("/images", StaticFiles(directory=str(images_path)), name="images")
+    
     return app
 
 

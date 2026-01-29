@@ -53,7 +53,8 @@ class ReverseDDIMRequest(BaseModel):
     """Request for DDIM inversion (detection)."""
     
     key_id: str = Field(..., description="Key identifier")
-    derived_key: str = Field(..., description="Derived key for detection (NOT master key)")
+    derived_key: str = Field(..., description="Derived key for detection (backward compat)")
+    master_key: str = Field(..., description="Master key for compute_g_values (required)")
     key_fingerprint: str = Field(..., description="Key fingerprint for validation")
     
     image_base64: str = Field(..., description="Base64-encoded image to analyze")

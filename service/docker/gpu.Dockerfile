@@ -10,19 +10,32 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies including Python 3.11
+# (Python 3.11+ required for StrEnum support in Pydantic v2)
 RUN apt-get update && apt-get install -y \
-    python3.10 \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
     python3-pip \
-    python3.10-venv \
     git \
     curl \
+    build-essential \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Make python3 point to python3.11
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # Create app directory
 WORKDIR /app
 
 # Install Python dependencies
+# Install cffi first (required by cryptography, huggingface stack, etc.)
+RUN pip3 install --no-cache-dir cffi
+
 # Install PyTorch with CUDA support
 RUN pip3 install --no-cache-dir \
     torch>=2.0.0 \

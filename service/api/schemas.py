@@ -188,6 +188,7 @@ class GPUDetectRequest(BaseModel):
     
     key_id: str
     derived_key: str
+    master_key: str  # Required for canonical g-value computation
     key_fingerprint: str
     image_base64: str
     g_field_config: Dict[str, Any]

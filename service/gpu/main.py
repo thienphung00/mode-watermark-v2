@@ -174,7 +174,7 @@ async def reverse_ddim(request: ReverseDDIMRequest) -> ReverseDDIMResponse:
     """
     Perform DDIM inversion and detect watermark.
     
-    SECURITY: Only accepts derived_key (never master_key).
+    NOTE: Accepts master_key for compute_g_values() to match training pipeline.
     """
     global pipeline
     
@@ -187,10 +187,11 @@ async def reverse_ddim(request: ReverseDDIMRequest) -> ReverseDDIMResponse:
         # Decode image
         image_bytes = base64.b64decode(request.image_base64)
         
-        # Run detection
+        # Run detection (master_key required for canonical g-value computation)
         result = pipeline.invert_and_detect(
             image_bytes=image_bytes,
             derived_key=request.derived_key,
+            master_key=request.master_key,
             key_id=request.key_id,
             g_field_config=request.g_field_config,
             detection_config=request.detection_config,

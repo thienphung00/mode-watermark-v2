@@ -19,8 +19,10 @@ services:
       - KEY_STORE_PATH=/app/data/keys.json
       - ARTIFACTS_PATH=/app/data/artifacts
       - API_DEBUG=false
+      - LIKELIHOOD_PARAMS_PATH= /app/likelihood_models/family_043.json
     volumes:
       - ./data:/app/data
+      - /home/thienphungmusic/mode-watermarking-restructured/service_data/likelihood_models:/app/likelihood_models:ro
     depends_on:
       gpu:
         condition: service_healthy
@@ -41,7 +43,7 @@ services:
       - GPU_PORT=8001
       - MODEL_ID=runwayml/stable-diffusion-v1-5
       - DEVICE=cuda
-      - STUB_MODE=true  # Set to false for real GPU inference
+      - STUB_MODE=false  # Set to false for real GPU inference
     deploy:
       resources:
         reservations:
@@ -55,6 +57,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 180s  # Models take time to load
+    volumes:
+      - /home/thienphungmusic/mode-watermarking-restructured/service_data/likelihood_models:/app/likelihood_models:ro
     restart: unless-stopped
 
 # For development without GPU, use this alternative:

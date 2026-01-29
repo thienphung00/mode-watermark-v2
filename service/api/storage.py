@@ -98,7 +98,12 @@ class LocalStorage(StorageBackend):
         filename: Optional[str] = None,
         content_type: str = "image/png",
     ) -> str:
-        """Save image to local filesystem."""
+        """
+        Save image to local filesystem.
+        
+        Returns:
+            Filename only (not full path) for URL construction.
+        """
         if filename is None:
             ext = content_type.split("/")[-1]
             filename = self._generate_filename(ext)
@@ -110,7 +115,8 @@ class LocalStorage(StorageBackend):
                 f.write(image_data)
             
             logger.info(f"Saved image to {filepath}")
-            return str(filepath)
+            # Return filename only - routes.py will construct the URL
+            return filename
             
         except Exception as e:
             logger.error(f"Failed to save image: {e}")

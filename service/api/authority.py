@@ -16,9 +16,40 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from service.api.artifacts import get_artifact_loader
 from service.api.key_store import get_key_store
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for likelihood params (loaded once at runtime)
+_ARTIFACT_LOADER = None
+_LIKELIHOOD_PARAMS = None
+
+
+def _load_likelihood_once():
+    """
+    Load likelihood parameters once and cache them.
+    
+    Returns:
+        Dictionary of likelihood parameters, or None if not available
+    """
+    global _ARTIFACT_LOADER, _LIKELIHOOD_PARAMS
+
+    if _LIKELIHOOD_PARAMS is not None:
+        return _LIKELIHOOD_PARAMS
+
+    loader = get_artifact_loader()
+    likelihood = loader.load_likelihood_params()
+
+    _ARTIFACT_LOADER = loader
+    _LIKELIHOOD_PARAMS = likelihood
+
+    if likelihood is not None:
+        print(f"[authority] Loaded likelihood params from {loader.likelihood_params_path}")
+    else:
+        print(f"[authority] No likelihood params available")
+
+    return likelihood
 
 
 class OperationType(str, Enum):
@@ -166,6 +197,12 @@ class Authority:
             "embedding_config": self.DEFAULT_EMBEDDING_CONFIG.copy(),
         }
     
+    def _get_likelihood_path(self) -> Optional[str]:
+        """Get path to likelihood params file."""
+        from service.api.config import get_config
+        config = get_config()
+        return config.likelihood_params_path
+    
     def get_detection_payload(
         self,
         key_id: str,
@@ -174,14 +211,16 @@ class Authority:
         """
         Get payload for detection request to GPU worker.
         
-        SECURITY: Returns derived_key, never master_key.
+        NOTE: For detection, master_key is now passed to GPU worker.
+        This is required because compute_g_values() needs the master_key
+        to compute g-values that match the training pipeline exactly.
         
         Args:
             key_id: Key identifier
             request_id: Request ID for tracing
             
         Returns:
-            Dictionary with derived_key, fingerprint, detection configs
+            Dictionary with master_key, derived_key, fingerprint, detection configs
             
         Raises:
             ValueError: If key not found or inactive
@@ -198,12 +237,19 @@ class Authority:
             request_id=request_id,
         )
         
+        # Build detection config with likelihood params path (not the params themselves)
+        detection_config = self.DEFAULT_DETECTION_CONFIG.copy()
+        likelihood_params_path = self._get_likelihood_path()
+        if likelihood_params_path is not None:
+            detection_config["likelihood_params_path"] = likelihood_params_path
+        
         return {
             "key_id": key_id,
-            "derived_key": derived_key,
+            "master_key": master_key,  # Required for compute_g_values() to match training
+            "derived_key": derived_key,  # Keep for backward compat
             "key_fingerprint": fingerprint,
             "g_field_config": self.DEFAULT_G_FIELD_CONFIG.copy(),
-            "detection_config": self.DEFAULT_DETECTION_CONFIG.copy(),
+            "detection_config": detection_config,
             "inversion_config": self.DEFAULT_INVERSION_CONFIG.copy(),
         }
     

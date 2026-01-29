@@ -36,6 +36,7 @@ from service.api.authority import get_authority
 from service.api.detector import get_detector, get_stub_detector
 from service.api.gpu_client import get_gpu_client, GPUClientError, GPUClientConnectionError
 from service.api.storage import get_storage
+from service.api.generation_store import get_generation_store
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,24 @@ async def generate_image(request: GenerateRequest) -> GenerateResponse:
         
         # Decode and store image
         image_data = base64.b64decode(response.image_base64)
-        image_url = await storage.save_image(image_data)
+        filename = await storage.save_image(image_data)
         
         processing_time_ms = (time.time() - start_time) * 1000
+        
+        # Construct browser-accessible URL
+        image_url = f"/images/{filename}"
+        
+        # Persist generation record (non-blocking, failure-tolerant)
+        try:
+            generation_store = get_generation_store()
+            generation_store.record_generation(
+                key_id=request.key_id,
+                filename=filename,
+                seed_used=response.seed_used,
+                processing_time_ms=processing_time_ms,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist generation record: {e}")
         
         return GenerateResponse(
             image_url=image_url,
@@ -255,6 +271,7 @@ async def detect_watermark(
         response = await gpu_client.detect(
             key_id=key_id,
             derived_key=payload["derived_key"],
+            master_key=payload["master_key"],
             key_fingerprint=payload["key_fingerprint"],
             image_base64=image_b64,
             request_id=request_id,

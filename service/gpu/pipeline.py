@@ -242,18 +242,48 @@ class GPUPipeline:
         import torch
         
         # Import watermarking components from src
+        from src.core.config import SeedBiasConfig
         from src.engine.strategies.seed_bias import SeedBiasStrategy
         
-        # Create watermark strategy
-        strategy = SeedBiasStrategy(
-            master_key=derived_key,  # Using derived key
-            key_id=key_id,
+<<<<<<< HEAD
+	
+=======
+        # Create SeedBiasConfig from embedding_config
+>>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
+        seed_bias_config = SeedBiasConfig(
             lambda_strength=embedding_config.get("lambda_strength", 0.05),
             domain=embedding_config.get("domain", "frequency"),
             low_freq_cutoff=embedding_config.get("low_freq_cutoff", 0.05),
             high_freq_cutoff=embedding_config.get("high_freq_cutoff", 0.4),
         )
         
+<<<<<<< HEAD
+	# Compute latent shape from image dimensions
+=======
+        # Compute latent shape from image dimensions
+>>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
+        latent_shape = (4, height // 8, width // 8)
+        
+        # Create watermark strategy with new constructor API
+        strategy = SeedBiasStrategy(
+            config=seed_bias_config,
+            master_key=derived_key,
+            latent_shape=latent_shape,
+            device=self.device,
+        )
+        
+        # Pass key_id via prepare_for_sample (not constructor)
+        strategy.prepare_for_sample(
+            sample_id=f"gen-{seed}",
+            prompt=prompt,
+            seed=seed,
+            key_id=key_id,
+        )
+<<<<<<< HEAD
+
+=======
+        
+>>>>>>> 9937f72 (Fix detection pipeline: use BayesianDetector, canonical g-values, align keys, GPU runtime fixes)
         # Set seed
         generator = torch.Generator(device=self.device).manual_seed(seed)
         
@@ -287,6 +317,7 @@ class GPUPipeline:
         self,
         image_bytes: bytes,
         derived_key: str,
+        master_key: str,
         key_id: str,
         g_field_config: Optional[Dict[str, Any]] = None,
         detection_config: Optional[Dict[str, Any]] = None,
@@ -297,7 +328,8 @@ class GPUPipeline:
         
         Args:
             image_bytes: Raw image bytes
-            derived_key: Scoped derived key (NOT master key)
+            derived_key: Scoped derived key (for backward compat)
+            master_key: Master key (required for compute_g_values)
             key_id: Key identifier
             g_field_config: G-field configuration
             detection_config: Detection parameters
@@ -314,7 +346,7 @@ class GPUPipeline:
         
         return self._detect_full(
             image_bytes=image_bytes,
-            derived_key=derived_key,
+            master_key=master_key,
             key_id=key_id,
             g_field_config=g_field_config or {},
             detection_config=detection_config or {},
@@ -355,30 +387,53 @@ class GPUPipeline:
     def _detect_full(
         self,
         image_bytes: bytes,
-        derived_key: str,
+        master_key: str,
         key_id: str,
         g_field_config: Dict[str, Any],
         detection_config: Dict[str, Any],
         inversion_config: Dict[str, Any],
     ) -> DetectionResult:
-        """Perform full DDIM inversion and detection."""
+        """
+        Perform full DDIM inversion and detection using canonical BayesianDetector.
+        
+        This method matches the canonical training/evaluation pipeline exactly:
+        - Uses compute_g_values() from src/detection/g_values
+        - Uses BayesianDetector from src/models/detectors
+        - Uses master_key (NOT derived_key) for g-value computation
+        """
         import torch
         from PIL import Image
         
-        # Import detection components from src
+        # Import detection components from src (canonical imports)
         from src.detection.inversion import DDIMInverter
         from src.detection.g_values import compute_g_values
-        from src.detection.statistics import detect_watermark, compute_s_statistic
-        from src.algorithms.g_field import compute_g_expected
+        from src.models.detectors import BayesianDetector
+        
+        # CRITICAL: Validate likelihood_params_path is provided
+        likelihood_params_path = detection_config.get("likelihood_params_path")
+        if likelihood_params_path is None:
+            raise ValueError(
+                "likelihood_params_path is required for Bayesian detection. "
+                "Set LIKELIHOOD_PARAMS_PATH environment variable."
+            )
+        
+        logger.info(f"Loading BayesianDetector from: {likelihood_params_path}")
+        
+        # Load trained detector
+        detector = BayesianDetector(
+            likelihood_params_path=likelihood_params_path,
+            threshold=detection_config.get("threshold", 0.5),
+            prior_watermarked=detection_config.get("prior_watermarked", 0.5),
+        )
+        
+        logger.info(f"Detector num_positions: {detector.num_positions}")
         
         # Load image
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         
         # Create inverter
         inverter = DDIMInverter(
-            vae=self._vae,
-            unet=self._pipeline.unet,
-            scheduler=self._pipeline.scheduler,
+            pipeline=self._pipeline,
             device=self.device,
         )
         
@@ -393,40 +448,72 @@ class GPUPipeline:
                 guidance_scale=1.0,
             )
         
-        latent_np = z_T.cpu().numpy()
-        if latent_np.ndim == 4:
-            latent_np = latent_np[0]
+        # z_T is [1, 4, 64, 64]
+        logger.info(f"Inverted latent shape: {z_T.shape}")
         
-        # Compute G-fields
-        g_expected = compute_g_expected(
-            master_key=derived_key,
-            key_id=key_id,
-            shape=latent_np.shape,
+        # Compute g-values using canonical function (matches training pipeline)
+        # CRITICAL: Use master_key, NOT derived_key
+        g, mask = compute_g_values(
+            x0=z_T,  # Inverted latent tensor [1, 4, 64, 64]
+            key=key_id,  # key_id string
+            master_key=master_key,  # Must be master_key, NOT derived_key
+            return_mask=True,
+            g_field_config=g_field_config,  # From detection_config
+            latent_type="zT",  # We're working with inverted latent
         )
         
-        # Simple detection
-        s_stat = compute_s_statistic(latent_np, g_expected)
+        logger.info(f"G-values shape: {g.shape}")
         
-        # Bayesian posterior
-        threshold = detection_config.get("threshold", 0.5)
-        prior = detection_config.get("prior_watermarked", 0.5)
+        # Flatten and prepare for detector
+        if g.dim() > 1:
+            g = g.flatten()
+        if mask is not None and mask.dim() > 1:
+            mask = mask.flatten()
         
-        # Simple likelihood ratio
-        n = latent_np.size
-        mu_w = np.sqrt(n) * 0.1
-        lr = np.exp(s_stat * mu_w - 0.5 * mu_w**2)
-        posterior_odds = (prior / (1 - prior)) * lr
-        posterior = posterior_odds / (1 + posterior_odds)
+        # Apply mask to get valid positions only
+        if mask is not None:
+            g_valid = g[mask > 0.5]
+        else:
+            g_valid = g
         
-        detected = posterior > threshold
+        # Binarize g-values to {0, 1}
+        g_binary = (g_valid > 0).float().unsqueeze(0)  # [1, N_eff]
+        mask_valid = mask[mask > 0.5].unsqueeze(0) if mask is not None else None
+        
+        # Validate mask alignment with detector
+        N_eff = int(g_binary.shape[1])
+        if detector.num_positions is not None and N_eff != detector.num_positions:
+            raise ValueError(
+                f"Mask alignment mismatch: g_binary has {N_eff} positions "
+                f"but likelihood model expects {detector.num_positions}. "
+                f"This indicates g_field_config mismatch between generation and detection."
+            )
+        
+        logger.info(f"Mask validated: {N_eff} positions")
+        
+        # Run detection using trained BayesianDetector
+        result = detector.score(g_binary, mask_valid)
+        
+        # Extract results
+        log_odds = result["log_odds"].item()
+        posterior = result["posterior"].item()
+        score = result["score"].item()
+        
+        # Decision based on log_odds sign (positive = watermarked)
+        detected = log_odds > 0
+        
+        logger.info(f"Detection result: log_odds={log_odds:.4f}, posterior={posterior:.4f}")
+        
+        # Get latent shape for result
+        latent_shape = tuple(z_T.shape[1:]) if z_T.dim() == 4 else tuple(z_T.shape)
         
         return DetectionResult(
             detected=detected,
-            score=float(s_stat),
-            confidence=float(posterior) if detected else float(1 - posterior),
-            log_odds=float(np.log(posterior_odds)) if posterior_odds > 0 else 0.0,
+            score=float(score),  # log_odds is the score
+            confidence=float(posterior),  # Use posterior directly as confidence
+            log_odds=float(log_odds),
             posterior=float(posterior),
-            latent_shape=latent_np.shape,
+            latent_shape=latent_shape,
         )
     
     def get_gpu_info(self) -> Dict[str, Any]:

@@ -161,6 +161,7 @@ class GPUClient:
         self,
         key_id: str,
         derived_key: str,
+        master_key: str,
         key_fingerprint: str,
         image_base64: str,
         request_id: str,
@@ -173,7 +174,8 @@ class GPUClient:
         
         Args:
             key_id: Key identifier
-            derived_key: Scoped derived key (NOT master key)
+            derived_key: Scoped derived key (for backward compat)
+            master_key: Master key (required for compute_g_values)
             key_fingerprint: Key fingerprint for validation
             image_base64: Base64-encoded image
             request_id: Request ID for tracing
@@ -190,6 +192,7 @@ class GPUClient:
         request = GPUDetectRequest(
             key_id=key_id,
             derived_key=derived_key,
+            master_key=master_key,
             key_fingerprint=key_fingerprint,
             image_base64=image_base64,
             g_field_config=g_field_config or {},

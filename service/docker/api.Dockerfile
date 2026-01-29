@@ -19,7 +19,8 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir fastapi uvicorn[standard] pydantic httpx Pillow numpy
+RUN pip install --no-cache-dir fastapi uvicorn[standard] pydantic httpx Pillow numpy python-multipart
+
 
 # Copy source code
 COPY src/ /app/src/
