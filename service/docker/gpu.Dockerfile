@@ -1,7 +1,7 @@
 # GPU Worker Dockerfile
 # Requires NVIDIA GPU runtime
 
-FROM nvidia/cuda:12.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.3.2-runtime-ubuntu22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
