@@ -98,3 +98,8 @@ experiments/
 runs/
 results/
 
+
+scripts/sync_artifacts.sh
+service_data/
+.DS_Store
+

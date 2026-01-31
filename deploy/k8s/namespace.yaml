@@ -1,9 +1,0 @@
-# Namespace for watermarking service
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: watermarking
-  labels:
-    app.kubernetes.io/name: watermarking
-    app.kubernetes.io/component: namespace
-

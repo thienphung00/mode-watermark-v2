@@ -19,9 +19,9 @@ Architecture Overview:
     │     └── G_expected[i] = g(PRF(master_key, key_id, i))          │
     │     └── Uses ChaCha20/AES-CTR, NOT XOR-shift                   │
     │                                                                 │
-    │  4. G_observed Extraction (observe.py)                         │
-    │     └── G_observed = extract_fn(z_T)                           │
-    │     └── Whitened matched filter or other extraction            │
+    │  4. G_observed Extraction (g_values.py)                         │
+    │     └── G_observed = compute_g_values(z_T, key, master_key)    │
+    │     └── Key-dependent g-value computation                      │
     │                                                                 │
     │  5. S-statistic Computation (statistics.py)                    │
     │     └── S = (1/√n) * Σ G_observed[i] * G_expected[i]          │
@@ -92,7 +92,6 @@ from .statistics import (
     threshold_from_fpr,
     expected_tpr,
     diagnose_detection,
-    StatisticsComputer,  # Legacy compatibility
 )
 
 # Calibration
@@ -139,18 +138,6 @@ try:
         invert_latent_ddim,
         extract_latent,
     )
-    from .observe import (
-        LatentObserver,
-        observe_latent,
-        observe_latent_numpy,
-        extract_raw,
-        extract_normalized,
-        extract_sign,
-        extract_whitened,
-        extract_frequency_phase,
-        extract_gradient_magnitude,
-        list_extraction_methods,
-    )
     from .g_values import (
         compute_g_values,
         compute_g_values_from_latent,
@@ -170,16 +157,6 @@ except ImportError:
     decode_latent_to_image = _torch_required
     invert_latent_ddim = _torch_required
     extract_latent = _torch_required
-    LatentObserver = _torch_required
-    observe_latent = _torch_required
-    observe_latent_numpy = _torch_required
-    extract_raw = _torch_required
-    extract_normalized = _torch_required
-    extract_sign = _torch_required
-    extract_whitened = _torch_required
-    extract_frequency_phase = _torch_required
-    extract_gradient_magnitude = _torch_required
-    list_extraction_methods = lambda: ["whitened", "normalized", "raw", "sign", "frequency_phase", "gradient"]
     compute_g_values = _torch_required
     compute_g_values_from_latent = _torch_required
     g_field_config_to_dict = _torch_required
@@ -219,18 +196,6 @@ __all__ = [
     "invert_latent_ddim",
     "extract_latent",
     
-    # Observation (DEPRECATED for detection - use compute_g_values instead)
-    "LatentObserver",
-    "observe_latent",
-    "observe_latent_numpy",
-    "extract_raw",
-    "extract_normalized",
-    "extract_sign",
-    "extract_whitened",
-    "extract_frequency_phase",
-    "extract_gradient_magnitude",
-    "list_extraction_methods",
-    
     # G-value computation (canonical function for detection)
     "compute_g_values",
     "compute_g_values_from_latent",
@@ -245,7 +210,6 @@ __all__ = [
     "threshold_from_fpr",
     "expected_tpr",
     "diagnose_detection",
-    "StatisticsComputer",
     
     # Calibration
     "CalibrationResult",
