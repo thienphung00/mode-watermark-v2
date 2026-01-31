@@ -14,6 +14,34 @@ from .statistics import DetectionResult, detect_watermark
 from ..algorithms.g_field import compute_g_expected
 
 
+def _extract_g_observed(latent_np: np.ndarray, method: str = "normalized") -> np.ndarray:
+    """
+    Extract observed G values from latent using simple numpy-based methods.
+    
+    Args:
+        latent_np: Latent tensor as numpy array (C, H, W)
+        method: Extraction method ("normalized", "sign", "raw")
+        
+    Returns:
+        Extracted G observed array
+    """
+    if method == "normalized":
+        # Zero-mean, unit-variance normalization
+        return (latent_np - latent_np.mean()) / (latent_np.std() + 1e-8)
+    elif method == "sign":
+        # Sign extraction
+        return np.sign(latent_np)
+    elif method == "raw":
+        # Raw values
+        return latent_np.copy()
+    elif method == "whitened":
+        # Simple whitening via normalization (simplified version)
+        return (latent_np - latent_np.mean()) / (latent_np.std() + 1e-8)
+    else:
+        # Default to normalized
+        return (latent_np - latent_np.mean()) / (latent_np.std() + 1e-8)
+
+
 def detect_image(
     image,  # PIL.Image, str (path), or np.ndarray
     key_id: str,
@@ -71,7 +99,6 @@ def detect_image(
     
     from PIL import Image as PILImage
     from .inversion import DDIMInverter, SimpleLatentEncoder
-    from .observe import observe_latent_numpy
     
     # Load image if path
     if isinstance(image, str):
@@ -104,11 +131,8 @@ def detect_image(
         shape=latent_np.shape,
     )
     
-    # Step 3: Extract observed G
-    g_observed = observe_latent_numpy(
-        latent_np,
-        method=extraction_method,
-    )
+    # Step 3: Extract observed G using simple numpy-based methods
+    g_observed = _extract_g_observed(latent_np, method=extraction_method)
     
     # Step 4: Detect watermark
     result = detect_watermark(
@@ -167,17 +191,7 @@ def detect_latent(
     )
     
     # Extract G_observed
-    try:
-        from .observe import observe_latent_numpy
-        g_observed = observe_latent_numpy(latent_np, method=extraction_method)
-    except ImportError:
-        # Simple numpy-based extraction fallback
-        if extraction_method == "normalized":
-            g_observed = (latent_np - latent_np.mean()) / (latent_np.std() + 1e-8)
-        elif extraction_method == "sign":
-            g_observed = np.sign(latent_np)
-        else:
-            g_observed = latent_np
+    g_observed = _extract_g_observed(latent_np, method=extraction_method)
     
     # Detect
     return detect_watermark(g_observed, g_expected, threshold, alpha)

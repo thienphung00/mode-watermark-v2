@@ -454,27 +454,4 @@ def invert_image(
     return z_T
 
 
-def encode_image_to_latent(
-    image: Union[Image.Image, str],
-    vae: torch.nn.Module,
-    device: str = "cuda",
-    allow_resize: bool = True,
-) -> torch.Tensor:
-    """
-    Simple image-to-latent encoding (z_0 only, no inversion).
-    
-    DEPRECATED: Use utils.encode_image_to_latent() instead.
-    This function is kept for backward compatibility.
-    
-    Args:
-        image: PIL image or path
-        vae: VAE encoder
-        device: Device
-        allow_resize: If True, allow resizing to 512x512. If False, require exact 512x512.
-        
-    Returns:
-        Latent z_0
-    """
-    from .utils import encode_image_to_latent as _encode_image_to_latent
-    return _encode_image_to_latent(image, vae, device=device, allow_resize=allow_resize)
 
