@@ -19,10 +19,10 @@ services:
       - KEY_STORE_PATH=/app/data/keys.json
       - ARTIFACTS_PATH=/app/data/artifacts
       - API_DEBUG=false
-      - LIKELIHOOD_PARAMS_PATH=/app/data/likelihood_models/family_043.json
+      - LIKELIHOOD_PARAMS_PATH=/app/experiments/likelihood_models_50/best_model
     volumes:
       - ./data:/app/data
-      - /home/thienphungmusic/mode-watermarking-restructured/service_data/likelihood_models:/app/data/likelihood_models:ro
+      - ../experiments:/app/experiments:ro
     depends_on:
       gpu:
         condition: service_healthy
@@ -58,7 +58,7 @@ services:
       retries: 3
       start_period: 180s  # Models take time to load
     volumes:
-      - /home/thienphungmusic/mode-watermarking-restructured/service_data/likelihood_models:/app/data/likelihood_models:ro
+      - ../experiments:/app/experiments:ro
     restart: unless-stopped
 
 # For development without GPU, use this alternative:

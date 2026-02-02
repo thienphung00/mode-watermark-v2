@@ -272,9 +272,14 @@ class BayesianDetector(nn.Module):
         from pathlib import Path
         
         path = Path(params_path)
+        # Allow path without .json extension (e.g. best_model -> best_model.json)
+        if not path.exists() and path.suffix != ".json":
+            path_json = path.with_suffix(".json")
+            if path_json.exists():
+                path = path_json
         if not path.exists():
             raise FileNotFoundError(f"Likelihood parameters not found: {params_path}")
-        
+
         with open(path, "r") as f:
             data = json.load(f)
         
