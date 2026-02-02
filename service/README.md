@@ -151,6 +151,7 @@ curl http://localhost:8000/health
 | `STORAGE_PATH` | `./data/images` | Local storage path |
 | `GCS_BUCKET` | - | GCS bucket name (if using GCS) |
 | `KEY_STORE_PATH` | `./data/keys.json` | Key store file path |
+| `LIKELIHOOD_PARAMS_PATH` | `./experiments/likelihood_models_50/best_model` | Path to likelihood model (for Bayesian detection) |
 | `ENCRYPTION_KEY` | - | Key encryption password |
 
 ### GPU Worker Variables

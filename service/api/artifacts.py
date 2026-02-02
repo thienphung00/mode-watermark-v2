@@ -76,10 +76,18 @@ class ArtifactLoader:
             return self._likelihood_params
         
         path = self.likelihood_params_path
-        if path is None or not path.exists():
+        if path is None:
+            logger.warning("Likelihood params path not set")
+            return None
+        # Allow path without .json extension (e.g. best_model -> best_model.json)
+        if not path.exists() and path.suffix != ".json":
+            path_json = path.with_suffix(".json")
+            if path_json.exists():
+                path = path_json
+        if not path.exists():
             logger.warning(f"Likelihood params not found at {path}")
             return None
-        
+
         try:
             with open(path, "r") as f:
                 self._likelihood_params = json.load(f)
