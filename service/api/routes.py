@@ -36,6 +36,7 @@ from service.api.authority import get_authority
 from service.api.gpu_client import get_gpu_client, GPUClientError, GPUClientConnectionError
 from service.api.storage import get_storage
 from service.api.generation_store import get_generation_store
+from service.api.image_utils import resize_image_to_512
 
 logger = logging.getLogger(__name__)
 
@@ -233,14 +234,16 @@ async def detect_watermark(
     if not authority.validate_key(key_id):
         raise HTTPException(status_code=400, detail=f"Invalid or inactive key: {key_id}")
     
-    # Get image data
+    # Get image data and resize to 512x512 for detection (required by hybrid/full_inversion)
     if image is not None:
         image_bytes = await image.read()
-        image_b64 = base64.b64encode(image_bytes).decode()
     elif image_base64 is not None:
-        image_b64 = image_base64
+        image_bytes = base64.b64decode(image_base64)
     else:
         raise HTTPException(status_code=400, detail="No image provided")
+
+    image_bytes = resize_image_to_512(image_bytes)
+    image_b64 = base64.b64encode(image_bytes).decode()
     
     # Get detection payload (master_key only)
     try:
