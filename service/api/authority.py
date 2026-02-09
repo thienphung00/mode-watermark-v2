@@ -111,8 +111,10 @@ class Authority:
     """
     
     # Default embedding configuration (seed-bias watermarking)
+    # CRITICAL: This MUST match the config used to train the likelihood model
+    # Source: /app/experiments/baseline_bandpass_mid_continuous.yaml
     DEFAULT_EMBEDDING_CONFIG = {
-        "lambda_strength": 0.05,
+        "lambda_strength": 0.075,
         "domain": "frequency",
         "low_freq_cutoff": 0.05,
         "high_freq_cutoff": 0.4,
@@ -126,14 +128,17 @@ class Authority:
     }
     
     # Default G-field configuration
+    # CRITICAL: This MUST match the config used to train the likelihood model
+    # Source: /app/experiments/baseline_bandpass_mid_continuous.yaml
     DEFAULT_G_FIELD_CONFIG = {
-        "mapping_mode": "binary",
+        "mapping_mode": "continuous",
+        "continuous_range": [-0.6, 0.6],
         "domain": "frequency",
         "frequency_mode": "bandpass",
-        "low_freq_cutoff": 0.05,
-        "high_freq_cutoff": 0.4,
+        "low_freq_cutoff": 0.08,
+        "high_freq_cutoff": 0.32,
         "normalize_zero_mean": True,
-        "normalize_unit_variance": True,
+        "normalize_unit_variance": False,
     }
     
     # Default inversion configuration
