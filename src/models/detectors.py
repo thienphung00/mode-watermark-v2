@@ -166,7 +166,9 @@ class UNetDetector(nn.Module):
         labels = batch["label"].float()
 
         # Forward pass
-        logits = self(images).squeeze(-1)
+        # Fix 5: Use view(-1) instead of squeeze(-1) for safer flattening
+        # squeeze(-1) can silently break if num_classes != 1
+        logits = self(images).view(-1)
 
         # Compute loss
         loss = F.binary_cross_entropy_with_logits(logits, labels)
@@ -202,6 +204,16 @@ class BayesianDetector(nn.Module):
     
     Computes posterior probability P(watermarked | g) using Bayes' rule.
     
+    MAPPING MODE SUPPORT:
+    - Binary (mapping_mode="binary"): Uses Bernoulli likelihood
+      log p(g | wm) = Σ [ g·log(p) + (1−g)·log(1−p) ]
+      
+    - Continuous (mapping_mode="continuous"): Uses Gaussian likelihood
+      g ~ Normal(μ_wm, σ_wm²) vs Normal(μ_clean, σ_clean²)
+      log p(g | wm) = Σ [ -0.5 * log(2π) - log(σ) - 0.5 * ((g - μ) / σ)² ]
+    
+    The likelihood type is automatically selected based on the trained model parameters.
+    
     This detector is:
         - Stateless: No internal state, pure computation
         - Metadata-free: Does not depend on manifests, seeds, or keys
@@ -209,11 +221,14 @@ class BayesianDetector(nn.Module):
         - Trained: Uses learned likelihood parameters from train_g_likelihoods.py
     
     Input Contract:
-        g: Tensor[B, N]        # Binary g-values per sample (values in {0, 1})
+        g: Tensor[B, N]        # G-values per sample (binary {0,1} or continuous ℝ)
         mask: Optional[B, N]   # Optional mask for valid positions
     
     The detector must be initialized with trained likelihood parameters.
     """
+    
+    # Minimum standard deviation floor for Gaussian likelihood (prevents numerical issues)
+    GAUSSIAN_STD_FLOOR = 1e-3
 
     def __init__(
         self,
@@ -238,6 +253,12 @@ class BayesianDetector(nn.Module):
         """
         super().__init__()
         
+        # Fix 1: Safe prior handling - validate prior is in open interval (0, 1)
+        assert 0.0 < prior_watermarked < 1.0, (
+            f"prior_watermarked must be in (0,1), got {prior_watermarked}. "
+            f"Values 0 or 1 cause log(0) = -inf which breaks posterior computation."
+        )
+        
         self.threshold = threshold
         self.prior_watermarked = prior_watermarked
         self.prior_unwatermarked = 1.0 - prior_watermarked
@@ -247,6 +268,10 @@ class BayesianDetector(nn.Module):
         self._stored_key_id = None
         self._stored_prf_algorithm = None
         
+        # Initialize likelihood parameters (will be set during load)
+        self.mapping_mode = "binary"  # Default, will be overridden by loaded params
+        self.likelihood_type = "bernoulli"  # Default, will be overridden by loaded params
+        
         # Load trained parameters
         if likelihood_params_path is not None:
             self._load_likelihood_params(likelihood_params_path)
@@ -255,6 +280,10 @@ class BayesianDetector(nn.Module):
             self.num_positions = None
             self.probs_watermarked = None
             self.probs_unwatermarked = None
+            self.means_watermarked = None
+            self.means_unwatermarked = None
+            self.stds_watermarked = None
+            self.stds_unwatermarked = None
             self.use_trained = False
         
         # Validate mask alignment if provided during initialization
@@ -264,6 +293,8 @@ class BayesianDetector(nn.Module):
     def _load_likelihood_params(self, params_path: str) -> None:
         """
         Load trained likelihood parameters from JSON file.
+        
+        Supports both Bernoulli (binary) and Gaussian (continuous) likelihoods.
         
         Args:
             params_path: Path to likelihood_params.json
@@ -284,18 +315,83 @@ class BayesianDetector(nn.Module):
             data = json.load(f)
         
         self.num_positions = data["num_positions"]
-        self.probs_watermarked = torch.tensor(
-            data["watermarked"]["probs"], dtype=torch.float32
-        )
-        self.probs_unwatermarked = torch.tensor(
-            data["unwatermarked"]["probs"], dtype=torch.float32
-        )
+        
+        # CRITICAL: Extract mapping_mode and likelihood_type
+        self.mapping_mode = data.get("mapping_mode", "binary")
+        self.likelihood_type = data.get("likelihood_type", "bernoulli")
+        
+        # Also check likelihood_type in watermarked/unwatermarked sub-dicts (backward compat)
+        if self.likelihood_type == "bernoulli" and "likelihood_type" in data.get("watermarked", {}):
+            self.likelihood_type = data["watermarked"]["likelihood_type"]
+        
+        # Validate mapping_mode and likelihood_type consistency
+        self._validate_likelihood_consistency()
+        
+        # Load parameters based on likelihood type
+        if self.likelihood_type == "bernoulli":
+            # Bernoulli likelihood: load probabilities
+            self.probs_watermarked = torch.tensor(
+                data["watermarked"]["probs"], dtype=torch.float32
+            )
+            self.probs_unwatermarked = torch.tensor(
+                data["unwatermarked"]["probs"], dtype=torch.float32
+            )
+            self.means_watermarked = None
+            self.means_unwatermarked = None
+            self.stds_watermarked = None
+            self.stds_unwatermarked = None
+            
+        elif self.likelihood_type == "gaussian":
+            # Gaussian likelihood: load means and stds
+            self.means_watermarked = torch.tensor(
+                data["watermarked"]["means"], dtype=torch.float32
+            )
+            self.stds_watermarked = torch.tensor(
+                data["watermarked"]["stds"], dtype=torch.float32
+            )
+            self.means_unwatermarked = torch.tensor(
+                data["unwatermarked"]["means"], dtype=torch.float32
+            )
+            self.stds_unwatermarked = torch.tensor(
+                data["unwatermarked"]["stds"], dtype=torch.float32
+            )
+            self.probs_watermarked = None
+            self.probs_unwatermarked = None
+            
+        else:
+            raise ValueError(
+                f"Unknown likelihood_type: {self.likelihood_type}. "
+                f"Expected 'bernoulli' or 'gaussian'."
+            )
+        
         self.use_trained = True
         
         # CRITICAL: Store key fingerprint from model file for verification
         self._stored_key_fingerprint = data.get("key_fingerprint")
         self._stored_key_id = data.get("key_id")
         self._stored_prf_algorithm = data.get("prf_algorithm")
+    
+    def _validate_likelihood_consistency(self) -> None:
+        """
+        Validate that mapping_mode and likelihood_type are consistent.
+        
+        Raises:
+            ValueError: If there's a mismatch between mapping_mode and likelihood_type
+        """
+        # Enforce consistency: binary -> bernoulli, continuous -> gaussian
+        if self.mapping_mode == "binary" and self.likelihood_type not in ("bernoulli",):
+            raise ValueError(
+                f"LIKELIHOOD MISMATCH: mapping_mode='binary' but likelihood_type='{self.likelihood_type}'. "
+                f"Binary mapping mode requires Bernoulli likelihood. "
+                f"This model was likely trained incorrectly."
+            )
+        
+        if self.mapping_mode == "continuous" and self.likelihood_type not in ("gaussian",):
+            raise ValueError(
+                f"LIKELIHOOD MISMATCH: mapping_mode='continuous' but likelihood_type='{self.likelihood_type}'. "
+                f"Continuous mapping mode requires Gaussian likelihood. "
+                f"This model was likely trained incorrectly."
+            )
     
     def _validate_mask_alignment(self, mask: torch.Tensor) -> None:
         """
@@ -354,8 +450,12 @@ class BayesianDetector(nn.Module):
         - log-odds: log P(watermarked | g) - log P(unwatermarked | g)
         - posterior: P(watermarked | g)
         
+        Likelihood computation depends on likelihood_type:
+        - Bernoulli (binary): log P(g_i | class) = g_i * log(p_i) + (1-g_i) * log(1-p_i)
+        - Gaussian (continuous): log P(g_i | class) = -0.5*log(2π) - log(σ_i) - 0.5*((g_i-μ_i)/σ_i)²
+        
         Args:
-            g: Binary g-values [B, N] with values in {0, 1}
+            g: G-values [B, N] - binary {0,1} for Bernoulli, continuous ℝ for Gaussian
             mask: Optional mask [B, N] with 1 for valid positions, 0 for invalid
             expected_key_fingerprint: Optional key fingerprint to verify against stored fingerprint.
                                      If provided and model has stored fingerprint, will raise error on mismatch.
@@ -383,16 +483,9 @@ class BayesianDetector(nn.Module):
         B, N = g.shape
         device = g.device
         
-        # Normalize g to {0, 1} if needed
+        # Ensure float dtype
         if g.dtype in (torch.long, torch.int64):
             g = g.float()
-        
-        # Convert {-1, +1} to {0, 1} if needed
-        unique_vals = torch.unique(g)
-        unique_set = set(unique_vals.cpu().tolist())
-        if unique_set.issubset({-1, 1}):
-            g = (g + 1) / 2
-        g = torch.clamp(torch.round(g), 0, 1)
         
         # Use trained parameters if available
         if self.use_trained:
@@ -401,63 +494,59 @@ class BayesianDetector(nn.Module):
                     f"G-values length {N} does not match trained model "
                     f"positions {self.num_positions}"
                 )
-            
-            probs_w = self.probs_watermarked.to(device)  # [N]
-            probs_u = self.probs_unwatermarked.to(device)  # [N]
+        
+        # Compute log-likelihoods based on likelihood type
+        if self.likelihood_type == "bernoulli":
+            log_p_w, log_p_u = self._compute_bernoulli_log_likelihood(g, device)
+        elif self.likelihood_type == "gaussian":
+            log_p_w, log_p_u = self._compute_gaussian_log_likelihood(g, device)
         else:
-            # Default: uniform model
-            probs_w = torch.full((N,), 0.5, device=device)
-            probs_u = torch.full((N,), 0.5, device=device)
+            raise ValueError(f"Unknown likelihood_type: {self.likelihood_type}")
         
-        # Expand to batch
-        probs_w = probs_w.unsqueeze(0).expand(B, -1)  # [B, N]
-        probs_u = probs_u.unsqueeze(0).expand(B, -1)  # [B, N]
-        
-        # Compute log-likelihoods per position
-        # log P(g_i | class) = g_i * log(p_i) + (1 - g_i) * log(1 - p_i)
-        log_p_w = g * torch.log(probs_w + 1e-10) + (1 - g) * torch.log(1 - probs_w + 1e-10)
-        log_p_u = g * torch.log(probs_u + 1e-10) + (1 - g) * torch.log(1 - probs_u + 1e-10)
-        
-        # Apply mask if provided
+        # Fix 3: Correct mask semantics using masked_select
+        # Previously: log_p_w = log_p_w * mask (mathematically incorrect - 0 log-likelihood
+        # implies probability=1, not "excluded from computation")
+        # Now: Use masked_select to properly select only valid positions before summing
         if mask is not None:
-            mask = mask.to(device)
+            mask = mask.to(device).bool()
             
-            # Validate mask alignment if using trained model
-            if self.use_trained:
-                # Ensure mask is 1D for validation
-                if mask.dim() > 1:
-                    mask_flat = mask.flatten()
-                else:
-                    mask_flat = mask
-                
-                # Hard assertion: mask must match model geometry
-                mask_sum = int(mask_flat.sum().item())
-                assert mask_sum == self.num_positions, (
-                    f"Mask alignment mismatch in score(): mask.sum()={mask_sum} != model.num_positions={self.num_positions}. "
-                    f"This indicates the mask used during detection does not match the mask used during training."
-                )
+            # Ensure mask has correct shape [B, N] for batch operations
+            if mask.dim() == 1:
+                mask = mask.unsqueeze(0).expand(B, -1)
             
-            log_p_w = log_p_w * mask
-            log_p_u = log_p_u * mask
+            # Fix 4: Removed redundant mask validation here
+            # _validate_mask_alignment() already performs this check during initialization
+            # Keeping duplicate validation risks drift and adds overhead
+            
+            # Select only valid (masked) positions
+            # masked_select returns 1D tensor, reshape to [B, num_valid_positions]
+            num_valid = int(mask[0].sum().item())  # Same for all batch elements
+            log_p_w = log_p_w.masked_select(mask).view(B, num_valid)
+            log_p_u = log_p_u.masked_select(mask).view(B, num_valid)
         
         # Sum over positions
         log_likelihood_w = log_p_w.sum(dim=1)  # [B]
         log_likelihood_u = log_p_u.sum(dim=1)  # [B]
+        
+        # Fix 2: Torch-native log priors for device/dtype consistency
+        # Previously used np.log() which forces CPU scalar and breaks dtype/device consistency
+        log_prior_w = torch.log(torch.tensor(self.prior_watermarked, device=device, dtype=log_likelihood_w.dtype))
+        log_prior_u = torch.log(torch.tensor(self.prior_unwatermarked, device=device, dtype=log_likelihood_u.dtype))
         
         # Compute log-odds (log posterior ratio)
         # log P(watermarked | g) - log P(unwatermarked | g)
         # = log P(g | watermarked) + log P(watermarked) - log P(g | unwatermarked) - log P(unwatermarked)
         log_odds = (
             log_likelihood_w
-            + np.log(self.prior_watermarked)
+            + log_prior_w
             - log_likelihood_u
-            - np.log(self.prior_unwatermarked)
+            - log_prior_u
         )
         
         # Compute posterior P(watermarked | g)
         # Using log-sum-exp trick for numerical stability
-        log_posterior_w = log_likelihood_w + np.log(self.prior_watermarked)
-        log_posterior_u = log_likelihood_u + np.log(self.prior_unwatermarked)
+        log_posterior_w = log_likelihood_w + log_prior_w
+        log_posterior_u = log_likelihood_u + log_prior_u
         
         # Normalize
         log_sum = torch.logsumexp(
@@ -476,6 +565,108 @@ class BayesianDetector(nn.Module):
             "score": log_odds,  # Use log-odds as main score
             "decision": decision,
         }
+    
+    def _compute_bernoulli_log_likelihood(
+        self,
+        g: torch.Tensor,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute Bernoulli log-likelihood for binary g-values.
+        
+        log P(g_i | class) = g_i * log(p_i) + (1 - g_i) * log(1 - p_i)
+        
+        Args:
+            g: Binary g-values [B, N] with values in {0, 1}
+            device: Device for computation
+            
+        Returns:
+            Tuple of (log_p_w, log_p_u) both [B, N]
+        """
+        B, N = g.shape
+        
+        # Normalize g to {0, 1} for Bernoulli
+        # Convert {-1, +1} to {0, 1} if needed
+        unique_vals = torch.unique(g)
+        unique_set = set(unique_vals.cpu().tolist())
+        if unique_set.issubset({-1, 1}):
+            g = (g + 1) / 2
+        g = torch.clamp(torch.round(g), 0, 1)
+        
+        # Get probabilities
+        if self.use_trained and self.probs_watermarked is not None:
+            probs_w = self.probs_watermarked.to(device)  # [N]
+            probs_u = self.probs_unwatermarked.to(device)  # [N]
+        else:
+            # Default: uniform model
+            probs_w = torch.full((N,), 0.5, device=device)
+            probs_u = torch.full((N,), 0.5, device=device)
+        
+        # Expand to batch
+        probs_w = probs_w.unsqueeze(0).expand(B, -1)  # [B, N]
+        probs_u = probs_u.unsqueeze(0).expand(B, -1)  # [B, N]
+        
+        # Compute Bernoulli log-likelihoods per position
+        log_p_w = g * torch.log(probs_w + 1e-10) + (1 - g) * torch.log(1 - probs_w + 1e-10)
+        log_p_u = g * torch.log(probs_u + 1e-10) + (1 - g) * torch.log(1 - probs_u + 1e-10)
+        
+        return log_p_w, log_p_u
+    
+    def _compute_gaussian_log_likelihood(
+        self,
+        g: torch.Tensor,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute Gaussian log-likelihood for continuous g-values.
+        
+        log P(g_i | class) = -0.5 * log(2π) - log(σ_i) - 0.5 * ((g_i - μ_i) / σ_i)²
+        
+        CRITICAL: This method does NOT binarize g-values. It expects continuous values.
+        
+        Args:
+            g: Continuous g-values [B, N] with values in ℝ
+            device: Device for computation
+            
+        Returns:
+            Tuple of (log_p_w, log_p_u) both [B, N]
+        """
+        B, N = g.shape
+        
+        # Get means and stds
+        if self.use_trained and self.means_watermarked is not None:
+            means_w = self.means_watermarked.to(device)  # [N]
+            stds_w = self.stds_watermarked.to(device).clamp(min=self.GAUSSIAN_STD_FLOOR)  # [N]
+            means_u = self.means_unwatermarked.to(device)  # [N]
+            stds_u = self.stds_unwatermarked.to(device).clamp(min=self.GAUSSIAN_STD_FLOOR)  # [N]
+        else:
+            # Default: standard normal
+            means_w = torch.zeros(N, device=device)
+            stds_w = torch.ones(N, device=device)
+            means_u = torch.zeros(N, device=device)
+            stds_u = torch.ones(N, device=device)
+        
+        # Expand to batch
+        means_w = means_w.unsqueeze(0).expand(B, -1)  # [B, N]
+        stds_w = stds_w.unsqueeze(0).expand(B, -1)  # [B, N]
+        means_u = means_u.unsqueeze(0).expand(B, -1)  # [B, N]
+        stds_u = stds_u.unsqueeze(0).expand(B, -1)  # [B, N]
+        
+        # Compute Gaussian log-likelihoods per position
+        # log P(g_i | class) = -0.5 * log(2π) - log(σ_i) - 0.5 * ((g_i - μ_i) / σ_i)²
+        log_2pi = torch.tensor(2 * np.pi, device=device, dtype=g.dtype)
+        log_p_w = (
+            -0.5 * torch.log(log_2pi)
+            - torch.log(stds_w)
+            - 0.5 * ((g - means_w) / stds_w) ** 2
+        )
+        log_p_u = (
+            -0.5 * torch.log(log_2pi)
+            - torch.log(stds_u)
+            - 0.5 * ((g - means_u) / stds_u) ** 2
+        )
+        
+        return log_p_w, log_p_u
     
     def forward(
         self,

@@ -705,14 +705,46 @@ def precompute_inverted_g_values(
                 mask = None
             
             # ========================================================================
-            # Detection Parity Guardrail: Binarization
+            # Detection Parity Guardrail: Config-Driven G-Value Mapping
             # ========================================================================
-            # CRITICAL: Binarization MUST match detection behavior exactly.
-            # Detection uses: g = (g > 0).float()
-            # This converts g-values to binary {0, 1} for Bernoulli likelihood model.
-            # Any deviation will cause train-detect mismatch.
+            # mapping_mode is applied inside compute_g_values (binary: sign agreement → {0,1};
+            # continuous: element-wise x0*G → real-valued). Here we only enforce binary
+            # output for binary mode (idempotent) and never threshold in continuous mode.
+            # Thresholding in continuous mode is forbidden — Gaussian likelihood requires ℝ.
             
-            g = (g > 0).float()
+            mapping_mode = g_field_config.get("mapping_mode")
+            
+            if mapping_mode == "binary":
+                g = (g > 0).float()  # Ensure {0, 1} (idempotent with compute_g_values output)
+            elif mapping_mode == "continuous":
+                # No thresholding, sign, or rounding — g is already real-valued from compute_g_values
+                pass
+            else:
+                raise ValueError(
+                    f"Unknown mapping_mode '{mapping_mode}'. "
+                    "Expected 'binary' or 'continuous'."
+                )
+            
+            # Runtime assertion: continuous mode must yield real-valued g (required for Gaussian likelihood)
+            if mapping_mode == "continuous":
+                uniq = torch.unique(g)
+                assert uniq.numel() > 10, (
+                    f"[FATAL] Continuous mode collapsed to binary: unique={uniq[:10]}"
+                )
+                assert g.dtype == torch.float32, (
+                    f"Continuous g-values must be float32, got {g.dtype}"
+                )
+                assert torch.unique(g).numel() > 2, (
+                    f"Continuous mode must have many unique values (>>2), got {torch.unique(g).numel()}. "
+                    "This indicates binarization or upstream bug."
+                )
+                assert not torch.all((g == 0) | (g == 1)), (
+                    "Continuous mode must not be confined to {0, 1}. "
+                    "Gaussian likelihood requires real-valued g."
+                )
+                assert g.std().item() > 0.01, (
+                    f"Continuous g-values must be non-degenerate (std > 0.01), got std={g.std().item()}"
+                )
             
             # Generate unique filenames
             g_filename = f"{uuid.uuid4().hex[:16]}.pt"
@@ -783,6 +815,9 @@ def precompute_inverted_g_values(
     # - Same config → same hash → provably aligned
     # - Different hash → different config → mismatch detected
     
+    # Resolve mapping_mode once for metadata (same source as per-image logic)
+    mapping_mode = g_field_config.get("mapping_mode")
+    
     metadata = {
         "latent_type": "zT",  # CRITICAL: Must match detection (zT, not z0)
         "num_inversion_steps": num_inversion_steps,
@@ -792,6 +827,7 @@ def precompute_inverted_g_values(
         "g_field_config": g_field_config,  # Full config for detailed inspection
         "config_path": str(config_path_obj),  # Actual config file path
         "num_samples": len(g_manifest_entries),
+        "mapping_mode": mapping_mode,  # Explicit: aids downstream debugging and experiment hygiene
     }
     
     logger.info(f"Saving metadata to {metadata_path}")

@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """
-Controlled evaluation and signal-strength tuning for the Bayesian watermark detector;
-uses log_odds as the sole score variable for thresholds, normalization, and metrics.
+Bayesian Detector Controlled Evaluation & Signal-Strength Tuning
+
+This script provides controlled evaluation and signal-strength tuning for the
+Bayesian watermark detector without changing detector math or likelihood logic.
+
+Features:
+- ROC curve & AUC computation at fixed inversion steps (25)
+- Adjustable detection threshold (evaluation-side only)
+- Comprehensive logging (N_eff, config hash, threshold, AUC)
+- Signal-strength tuning via config (mask density, frequency band, normalization)
+
+This script is generation-side + evaluation-side only. Detector correctness
+and likelihood logic remain unchanged.
 
 Usage:
     python scripts/evaluate_bayesian_detector.py \
@@ -348,6 +359,16 @@ def detect_watermark_bayesian_from_g_values(
         if g.dtype != torch.float32:
             g = g.float()
         # No binarization or rounding - preserve exact values
+        
+        # Runtime consistency check: warn if g-values appear binary
+        unique_vals = torch.unique(g)
+        unique_set = set(unique_vals.cpu().tolist())
+        if unique_set.issubset({0.0, 1.0}):
+            import warnings
+            warnings.warn(
+                f"mapping_mode is 'continuous' but g-values appear binary (all values in {{0, 1}}). "
+                f"This may indicate a pipeline misconfiguration."
+            )
     else:
         raise ValueError(f"Invalid mapping_mode: {mapping_mode}. Must be 'binary' or 'continuous'")
     
@@ -438,9 +459,45 @@ def evaluate_bayesian_detector(
     """
     # Load manifest
     entries = load_manifest(manifest_path)
-
-    # Score consistency: evaluation uses log_odds only; normalization and calibration
-    # are applied to log_odds. S is not used for thresholds or metrics.
+    
+    # CRITICAL: Load inversion_steps from metadata.json (single source of truth)
+    metadata_path = manifest_path.parent / "metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+                metadata_inversion_steps = metadata.get("num_inversion_steps")
+                
+                if metadata_inversion_steps is not None:
+                    # Validate consistency if user provided --inversion-steps
+                    if inversion_steps != 25:  # 25 is the default, so user explicitly set it
+                        if inversion_steps != metadata_inversion_steps:
+                            raise RuntimeError(
+                                f"INVERSION STEPS MISMATCH: "
+                                f"CLI argument --inversion-steps={inversion_steps} does not match "
+                                f"precomputed G-values metadata (num_inversion_steps={metadata_inversion_steps}). "
+                                f"The G-values in {manifest_path.parent} were precomputed with "
+                                f"{metadata_inversion_steps} inversion steps. "
+                                f"Either omit --inversion-steps to use the correct value from metadata, "
+                                f"or provide the matching value: --inversion-steps {metadata_inversion_steps}"
+                            )
+                    
+                    # Override with authoritative value from metadata
+                    inversion_steps = metadata_inversion_steps
+                    print(f"Inversion steps (from precomputed G-values metadata): {inversion_steps}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse metadata.json at {metadata_path}: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to read metadata.json at {metadata_path}: {e}") from e
+    else:
+        # Metadata file missing - warn user but continue with provided value
+        import warnings
+        warnings.warn(
+            f"metadata.json not found at {metadata_path}. "
+            f"Using --inversion-steps={inversion_steps} from CLI, but this cannot be validated. "
+            f"For reproducible experiments, ensure metadata.json exists alongside g-manifest.jsonl.",
+            UserWarning,
+        )
     
     if len(entries) == 0:
         raise ValueError(f"Manifest is empty: {manifest_path}")
@@ -490,6 +547,17 @@ def evaluate_bayesian_detector(
     detector = BayesianDetector(
         likelihood_params_path=likelihood_params_path,
     )
+    
+    # Verify mapping_mode consistency between data and detector
+    if detector.mapping_mode != mapping_mode:
+        raise RuntimeError(
+            f"MAPPING MODE MISMATCH: Data has mapping_mode='{mapping_mode}' but "
+            f"detector was trained with mapping_mode='{detector.mapping_mode}'. "
+            f"The likelihood model must match the g-value format. "
+            f"Retrain the likelihood model with the correct mapping_mode."
+        )
+    
+    print(f"Detector likelihood_type: {detector.likelihood_type}")
     
     # Collect scores and labels
     log_odds_scores = []
@@ -616,7 +684,7 @@ def evaluate_bayesian_detector(
         log_odds_threshold = float(selected_threshold)
         threshold_source = "roc_closest_fpr"
 
-    # Apply threshold and compute metrics at this operating point (log_odds only; S not used)
+    # Apply threshold and compute metrics at this operating point
     predictions_array = (scores_array > float(log_odds_threshold)).astype(int)
     metrics = compute_metrics(predictions_array.tolist(), labels, log_odds_scores)
     metrics["auc"] = auc
@@ -720,7 +788,7 @@ def evaluate_bayesian_detector(
     
     # Build evaluation info
     evaluation_info = {
-        "inversion_steps": inversion_steps,
+        "inversion_steps": inversion_steps,  # From precomputed G-values metadata
         "latent_type": latent_type,
         "log_odds_threshold": log_odds_threshold,
         "threshold_source": threshold_source,
@@ -930,7 +998,7 @@ def main():
     print(f"\nExperiment Hygiene:")
     print(f"  Average N_eff: {evaluation_info['avg_n_eff']:.1f}")
     print(f"  G-field config hash: {evaluation_info.get('g_field_config_hash', 'N/A')}")
-    print(f"  Inversion steps: {evaluation_info['inversion_steps']}")
+    print(f"  Inversion steps (from precomputed G-values): {evaluation_info['inversion_steps']}")
     print(f"  Latent type: {evaluation_info['latent_type']}")
     print(f"  Log-odds threshold: {evaluation_info['log_odds_threshold']}")
     print(f"  AUC: {evaluation_info['auc']:.4f}")

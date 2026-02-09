@@ -95,7 +95,7 @@ def compute_g_values(
     This is the canonical function for computing g-values. It:
     1. Generates expected G-field from key using PRF
     2. Compares observed latent against expected G-field
-    3. Outputs binary g-values {0,1} indicating alignment
+    3. Outputs g-values: binary {0,1} (mapping_mode="binary") or real-valued (mapping_mode="continuous")
     
     This function must be used:
     - During watermark generation (to compute ground truth g-values)
@@ -128,7 +128,8 @@ def compute_g_values(
     
     Returns:
         Tuple of (g, mask):
-            - g: Binary g-values [B, N] or [N] with values in {0, 1}
+            - g: G-values [B, N] or [N]. If mapping_mode="binary": values in {0, 1}.
+                 If mapping_mode="continuous": real-valued floats (element-wise x0*G), no thresholding.
             - mask: Optional mask [B, N] or [N] with 1 for valid positions, 0 for invalid
                    If return_mask=False, mask is None
                    The mask identifies structurally valid positions based on frequency
@@ -235,19 +236,33 @@ def compute_g_values(
     # G_expected_np is already float32 from GFieldGenerator
     G_expected = torch.from_numpy(G_expected_np).to(device=device, dtype=torch.float32)  # [C, H, W]
     
-    # Compare observed latent against expected G-field
-    # Method: sign agreement - g_i = 1 if sign(x0_i) == sign(G_expected_i), else 0
-    # This measures alignment between observed and expected signals
-    
     # Expand G_expected to batch dimension
     G_expected = G_expected.unsqueeze(0).expand(B, -1, -1, -1)  # [B, C, H, W]
     
-    # Compute sign agreement
-    sign_x0 = torch.sign(x0)  # [B, C, H, W]
-    sign_G = torch.sign(G_expected)  # [B, C, H, W]
+    # -------------------------------------------------------------------------
+    # Binary vs continuous semantics (mapping_mode)
+    # -------------------------------------------------------------------------
+    # - binary:     g_i ∈ {0, 1} from sign agreement (Bernoulli likelihood).
+    #   Thresholding is intentional and required for binary mode.
+    # - continuous: g_i ∈ ℝ from element-wise product x0_i * G_i (Gaussian likelihood).
+    #   No thresholding, sign, or rounding — real-valued only.
+    # -------------------------------------------------------------------------
+    mapping_mode = (g_field_config.get("mapping_mode") or "binary").lower()
     
-    # g_i = 1 if signs agree, 0 otherwise
-    g = (sign_x0 == sign_G).float()  # [B, C, H, W]
+    if mapping_mode == "binary":
+        # Binary: sign agreement → g_i = 1 if sign(x0_i) == sign(G_i), else 0
+        sign_x0 = torch.sign(x0)  # [B, C, H, W]
+        sign_G = torch.sign(G_expected)  # [B, C, H, W]
+        g = (sign_x0 == sign_G).float()  # [B, C, H, W]
+    elif mapping_mode == "continuous":
+        # Continuous: preserve real-valued alignment (additive/affine in magnitude).
+        # g_i = x0_i * G_i (element-wise product). No sign, no threshold — forbidden in continuous mode.
+        g = (x0 * G_expected)  # [B, C, H, W], real-valued
+    else:
+        raise ValueError(
+            f"mapping_mode must be 'binary' or 'continuous', got '{mapping_mode}'. "
+            "Binary uses sign agreement {0,1}; continuous uses real-valued product."
+        )
     
     # Flatten to [B, N]
     g = g.flatten(start_dim=1)  # [B, N]

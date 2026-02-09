@@ -84,6 +84,7 @@ def detect_watermark_bayesian_from_g_values(
     g: torch.Tensor,
     mask: Optional[torch.Tensor],
     detector: BayesianDetector,
+    mapping_mode: str = "binary",
 ) -> dict:
     """
     Detect watermark using Bayesian detector with precomputed g-values.
@@ -91,12 +92,15 @@ def detect_watermark_bayesian_from_g_values(
     This function uses precomputed g-values directly - no DDIM inversion,
     no image loading, no g-value computation.
     
-    All g-value normalization and binarization happens here (single source of truth).
+    G-value handling depends on mapping_mode:
+    - Binary: Normalize and binarize to {0, 1} for Bernoulli likelihood
+    - Continuous: Preserve real-valued g-values for Gaussian likelihood
     
     Args:
-        g: Precomputed g-values tensor [N] or [1, N] (raw, will be normalized/binarized here)
+        g: Precomputed g-values tensor [N] or [1, N]
         mask: Optional mask tensor [N] or [1, N] (typically None since g is already masked)
         detector: Pre-loaded BayesianDetector
+        mapping_mode: "binary" or "continuous" - determines g-value handling
         
     Returns:
         Detection result dictionary
@@ -107,23 +111,43 @@ def detect_watermark_bayesian_from_g_values(
     if mask is not None and mask.dim() == 1:
         mask = mask.unsqueeze(0)  # [1, N]
     
-    # Normalize and binarize g-values (single source of truth)
     # Convert to float if needed
     if g.dtype in (torch.long, torch.int64):
         g = g.float()
     
-    # Handle {-1, 1} format: convert to {0, 1}
-    unique_vals = torch.unique(g)
-    if set(unique_vals.cpu().tolist()).issubset({-1.0, 1.0}):
-        g = (g + 1) / 2
+    # Handle g-value processing based on mapping_mode
+    if mapping_mode == "binary":
+        # Binary mode: Normalize and binarize g-values
+        # Handle {-1, 1} format: convert to {0, 1}
+        unique_vals = torch.unique(g)
+        if set(unique_vals.cpu().tolist()).issubset({-1.0, 1.0}):
+            g = (g + 1) / 2
+        
+        # Ensure values are in [0, 1] range
+        g = torch.clamp(torch.round(g), 0, 1)
+        
+        # Binarize: convert to binary {0, 1}
+        g = (g > 0).float()
+        
+    elif mapping_mode == "continuous":
+        # Continuous mode: Preserve real-valued g-values exactly
+        # Only ensure float32 dtype, NO binarization
+        if g.dtype != torch.float32:
+            g = g.float()
+        
+        # Runtime consistency check: warn if g-values appear binary
+        unique_vals = torch.unique(g)
+        unique_set = set(unique_vals.cpu().tolist())
+        if unique_set.issubset({0.0, 1.0}):
+            import warnings
+            warnings.warn(
+                f"mapping_mode is 'continuous' but g-values appear binary (all values in {{0, 1}}). "
+                f"This may indicate a pipeline misconfiguration."
+            )
+    else:
+        raise ValueError(f"Invalid mapping_mode: {mapping_mode}. Must be 'binary' or 'continuous'")
     
-    # Ensure values are in [0, 1] range
-    g = torch.clamp(torch.round(g), 0, 1)
-    
-    # Binarize: convert to binary {0, 1}
-    g = (g > 0).float()
-    
-    # Run detection
+    # Run detection (detector will use appropriate likelihood based on its trained type)
     result = detector.score(g, mask)
     
     # Extract log_odds
@@ -136,6 +160,55 @@ def detect_watermark_bayesian_from_g_values(
         "log_odds": float(log_odds),
         "score": float(log_odds),
     }
+
+
+def determine_mapping_mode(manifest_path: Path, entries: list) -> str:
+    """
+    Determine mapping_mode from metadata or manifest entries.
+    
+    Precedence:
+    1. metadata.json["mapping_mode"]
+    2. metadata.json["g_field_config"]["mapping_mode"]
+    3. entry["mapping_mode"] (if present in any manifest entry)
+    4. Default to "binary"
+    
+    Args:
+        manifest_path: Path to manifest.jsonl file
+        entries: List of manifest entries
+        
+    Returns:
+        mapping_mode: "binary" or "continuous"
+    """
+    # First, check metadata.json
+    metadata_path = manifest_path.parent / "metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+                
+                # Direct mapping_mode field
+                mapping_mode = metadata.get("mapping_mode")
+                if mapping_mode in {"binary", "continuous"}:
+                    return mapping_mode
+                
+                # From g_field_config
+                g_field_config = metadata.get("g_field_config", {})
+                if isinstance(g_field_config, dict):
+                    mapping_mode = g_field_config.get("mapping_mode")
+                    if mapping_mode in {"binary", "continuous"}:
+                        return mapping_mode
+        except Exception:
+            pass  # Fall back to checking entries
+    
+    # Second, check manifest entries
+    for entry in entries:
+        if "mapping_mode" in entry:
+            mapping_mode = entry["mapping_mode"]
+            if mapping_mode in {"binary", "continuous"}:
+                return mapping_mode
+    
+    # Default to binary for backward compatibility
+    return "binary"
 
 
 def compute_metrics(
@@ -232,11 +305,26 @@ def batch_detect_watermark_bayesian(
     
     print(f"Processing {len(entries)} samples from g-manifest: {manifest_path}")
     
+    # Determine mapping_mode from metadata
+    mapping_mode = determine_mapping_mode(manifest_path, entries)
+    print(f"Detected mapping_mode: {mapping_mode}")
+    
     # Load Bayesian detector (once for all samples)
     # Note: threshold parameter is not used - decision is based on log_odds > 0
     detector = BayesianDetector(
         likelihood_params_path=likelihood_params_path,
     )
+    
+    # Verify mapping_mode consistency between data and detector
+    if detector.mapping_mode != mapping_mode:
+        raise RuntimeError(
+            f"MAPPING MODE MISMATCH: Data has mapping_mode='{mapping_mode}' but "
+            f"detector was trained with mapping_mode='{detector.mapping_mode}'. "
+            f"The likelihood model must match the g-value format. "
+            f"Retrain the likelihood model with the correct mapping_mode."
+        )
+    
+    print(f"Detector likelihood_type: {detector.likelihood_type}")
     
     predictions = []
     labels = []
@@ -304,6 +392,7 @@ def batch_detect_watermark_bayesian(
                 g=g,
                 mask=mask,
                 detector=detector,
+                mapping_mode=mapping_mode,
             )
             
             # Extract results - use log_odds as the detection score

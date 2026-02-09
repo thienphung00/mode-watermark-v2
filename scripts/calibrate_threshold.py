@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-This script treats image transformations as views and calibrates a worst-case-safe
-deployment threshold for watermark detection (per family, from log_odds).
+Phase 9: Calibrate a single global (worst-case-safe) threshold per detector family.
+
+Targets a user-specified FPR. Computes per-transform thresholds on clean scores,
+then selects the worst-case-safe threshold (max over transforms) so that FPR
+is at or below target for every transform. This threshold is the deployment threshold.
+
+Input: Detection results (per_image with label, log_odds, transform) and optional
+       normalization params (if scores are normalized, use normalized for calibration).
+Output: One deployment threshold per family and per-transform thresholds for audit.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -30,36 +36,18 @@ def calibrate_family(
     per_image: List[Dict[str, Any]],
     target_fpr: float,
     normalization: Dict[str, float],
-    logger: Any = None,
 ) -> Dict[str, Any]:
     """
     For one family: group by transform; for each transform compute threshold at target_fpr
-    on clean scores (log_odds); deployment threshold = max over transforms (worst-case-safe).
-    Optionally normalize scores first using normalization (mean, std). Records which
-    transform governs the deployment threshold.
+    on clean scores; deployment threshold = max over transforms (worst-case-safe).
+    Optionally normalize scores first using normalization (mean, std).
     """
-    # Score consistency: we use log_odds only; do not use S for thresholds
-    if per_image and any(e.get("S") is not None for e in per_image):
-        if logger:
-            logger.warning("Calibration uses log_odds only; S is present in data but ignored for thresholds.")
-
     by_transform: Dict[str, List[Dict[str, Any]]] = {}
     for e in per_image:
         t = e.get("transform", "identity")
         if t not in by_transform:
             by_transform[t] = []
         by_transform[t].append(e)
-
-    # Lightweight invariant: warn if any transform has no clean or no watermarked
-    for t, entries in by_transform.items():
-        n_clean = sum(1 for e in entries if e.get("label", 1) == 0)
-        n_wm = sum(1 for e in entries if e.get("label", 0) == 1)
-        if n_clean == 0:
-            if logger:
-                logger.warning("Transform '%s' has no clean samples; threshold set to inf.", t)
-        if n_wm == 0:
-            if logger:
-                logger.warning("Transform '%s' has no watermarked samples.", t)
 
     mean = normalization.get("mean", 0.0) if normalization else 0.0
     std = normalization.get("std", 1.0) if normalization else 1.0
@@ -88,28 +76,15 @@ def calibrate_family(
         )
         per_transform_thresholds[t] = result.threshold
         per_transform_achieved_fpr[t] = result.achieved_fpr
-        # Warn if achieved FPR is far from target (log deviation; non-fatal)
-        if target_fpr > 0 and result.achieved_fpr > 0 and logger:
-            log_ratio = math.log(result.achieved_fpr / target_fpr)
-            if abs(log_ratio) > 0.5:
-                logger.warning(
-                    "Transform '%s': achieved_fpr=%.4f vs target_fpr=%.4f (log ratio %.3f).",
-                    t, result.achieved_fpr, target_fpr, log_ratio,
-                )
 
     if not per_transform_thresholds:
         deployment_threshold = 0.0
-        governing_transform = ""
     else:
         deployment_threshold = float(max(per_transform_thresholds.values()))
-        governing_transform = next(
-            t for t, tau in per_transform_thresholds.items() if tau == deployment_threshold
-        )
 
     return {
         "target_fpr": target_fpr,
         "deployment_threshold": deployment_threshold,
-        "governing_transform": governing_transform,
         "per_transform_threshold": per_transform_thresholds,
         "per_transform_achieved_fpr": per_transform_achieved_fpr,
     }
@@ -167,20 +142,13 @@ def main() -> None:
     calibration_by_family: Dict[str, Any] = {}
     for family_id, per_image in by_family.items():
         norm = norm_by_family.get(family_id) or {}
-        calibration_by_family[family_id] = calibrate_family(
-            per_image, args.target_fpr, norm, logger=logger
-        )
+        calibration_by_family[family_id] = calibrate_family(per_image, args.target_fpr, norm)
         d = calibration_by_family[family_id]
         logger.info(
             "family %s: deployment_threshold=%.4f (target_fpr=%.4f)",
             family_id,
             d["deployment_threshold"],
             d["target_fpr"],
-        )
-        logger.info(
-            "  governing_transform=%s (deployment_threshold=%.4f)",
-            d.get("governing_transform", ""),
-            d["deployment_threshold"],
         )
         for t, thr in d["per_transform_threshold"].items():
             logger.info("  transform %s: threshold=%.4f achieved_fpr=%.4f", t, thr, d["per_transform_achieved_fpr"].get(t, 0))
