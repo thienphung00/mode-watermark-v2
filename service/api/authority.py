@@ -198,6 +198,18 @@ class Authority:
         config = get_config()
         return config.likelihood_params_path
     
+    def _get_normalization_path(self) -> Optional[str]:
+        """Get path to normalization params file."""
+        from service.api.config import get_config
+        config = get_config()
+        return config.normalization_params_path
+    
+    def _get_calibration_path(self) -> Optional[str]:
+        """Get path to calibration params file."""
+        from service.api.config import get_config
+        config = get_config()
+        return config.calibration_params_path
+    
     def get_detection_payload(
         self,
         key_id: str,
@@ -226,11 +238,23 @@ class Authority:
         
         fingerprint = self.key_store.get_fingerprint(key_id)
         
-        # Build detection config with likelihood params path (not the params themselves)
+        # Build detection config with all artifact paths (not the params themselves)
         detection_config = self.DEFAULT_DETECTION_CONFIG.copy()
+        
+        # Add likelihood params path
         likelihood_params_path = self._get_likelihood_path()
         if likelihood_params_path is not None:
             detection_config["likelihood_params_path"] = likelihood_params_path
+        
+        # Add normalization params path
+        normalization_params_path = self._get_normalization_path()
+        if normalization_params_path is not None:
+            detection_config["normalization_params_path"] = normalization_params_path
+        
+        # Add calibration params path
+        calibration_params_path = self._get_calibration_path()
+        if calibration_params_path is not None:
+            detection_config["calibration_params_path"] = calibration_params_path
         
         return {
             "key_id": key_id,

@@ -19,7 +19,9 @@ services:
       - KEY_STORE_PATH=/app/data/keys.json
       - ARTIFACTS_PATH=/app/data/artifacts
       - API_DEBUG=false
-      - LIKELIHOOD_PARAMS_PATH=/app/experiments/likelihood_models_50/best_model
+      - LIKELIHOOD_PARAMS_PATH=/app/experiments/likelihood_params.json
+      - NORMALIZATION_PARAMS_PATH=/app/experiments/normalization_098.json
+      - CALIBRATION_PARAMS_PATH=/app/experiments/calibration_098.json
     volumes:
       - ./data:/app/data
       - ../experiments:/app/experiments:ro

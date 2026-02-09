@@ -400,6 +400,11 @@ class GPUPipeline:
         - Uses compute_g_values() from src/detection/g_values
         - Uses BayesianDetector from src/models/detectors
         - compute_g_values() uses (master_key, key_id) directly
+        
+        CALIBRATED DETECTION FLOW:
+        1. Compute raw log-odds using BayesianDetector
+        2. Normalize log-odds using normalization_params (mean, std)
+        3. Compare normalized score against calibrated threshold
         """
         import torch
         from PIL import Image
@@ -409,17 +414,60 @@ class GPUPipeline:
         from src.detection.g_values import compute_g_values
         from src.models.detectors import BayesianDetector
         
-        # CRITICAL: Validate likelihood_params_path is provided
+        # CRITICAL: Validate all three artifact paths are provided
         likelihood_params_path = detection_config.get("likelihood_params_path")
+        normalization_params_path = detection_config.get("normalization_params_path")
+        calibration_params_path = detection_config.get("calibration_params_path")
+        
         if likelihood_params_path is None:
             raise ValueError(
                 "likelihood_params_path is required for Bayesian detection. "
                 "Set LIKELIHOOD_PARAMS_PATH environment variable."
             )
         
-        logger.info(f"Loading BayesianDetector from: {likelihood_params_path}")
+        if normalization_params_path is None:
+            raise ValueError(
+                "normalization_params_path is required for calibrated detection. "
+                "Set NORMALIZATION_PARAMS_PATH environment variable."
+            )
         
-        # Load trained detector
+        if calibration_params_path is None:
+            raise ValueError(
+                "calibration_params_path is required for calibrated detection. "
+                "Set CALIBRATION_PARAMS_PATH environment variable."
+            )
+        
+        logger.info(f"Loading BayesianDetector from: {likelihood_params_path}")
+        logger.info(f"Loading normalization params from: {normalization_params_path}")
+        logger.info(f"Loading calibration params from: {calibration_params_path}")
+        
+        # Load normalization parameters
+        import json
+        from pathlib import Path
+        
+        with open(normalization_params_path, "r") as f:
+            normalization_data = json.load(f)
+        
+        # Extract normalization params for the specific family
+        # Assuming family_098 is the key (adjust if needed)
+        family_key = list(normalization_data.keys())[0]
+        norm_mean = normalization_data[family_key]["mean"]
+        norm_std = normalization_data[family_key]["std"]
+        
+        logger.info(f"Normalization params: mean={norm_mean:.2f}, std={norm_std:.2f}")
+        
+        # Load calibration parameters
+        with open(calibration_params_path, "r") as f:
+            calibration_data = json.load(f)
+        
+        # Extract calibration threshold for the specific family
+        family_key = list(calibration_data.keys())[0]
+        calibrated_threshold = calibration_data[family_key]["deployment_threshold"]
+        target_fpr = calibration_data[family_key]["target_fpr"]
+        
+        logger.info(f"Calibration params: threshold={calibrated_threshold:.4f}, target_fpr={target_fpr}")
+        
+        # Load trained detector (with default threshold - we'll override with calibrated one)
         detector = BayesianDetector(
             likelihood_params_path=likelihood_params_path,
             threshold=detection_config.get("threshold", 0.5),
@@ -494,25 +542,44 @@ class GPUPipeline:
         # Run detection using trained BayesianDetector
         result = detector.score(g_binary, mask_valid)
         
-        # Extract results
-        log_odds = result["log_odds"].item()
+        # Extract raw log-odds
+        raw_log_odds = result["log_odds"].item()
         posterior = result["posterior"].item()
-        score = result["score"].item()
         
-        # Decision based on log_odds sign (positive = watermarked)
-        detected = log_odds > 0
+        # CRITICAL: Apply normalization to raw log-odds
+        # normalized_score = (raw_log_odds - mean) / std
+        normalized_score = (raw_log_odds - norm_mean) / norm_std
         
-        logger.info(f"Detection result: log_odds={log_odds:.4f}, posterior={posterior:.4f}")
+        # CRITICAL: Use calibrated threshold for detection decision
+        # Detection: normalized_score > calibrated_threshold
+        detected = normalized_score > calibrated_threshold
+        
+        # Compute confidence based on distance from threshold
+        # Higher normalized score = higher confidence in watermarked
+        # Lower normalized score = higher confidence in clean
+        if detected:
+            # Watermarked: confidence increases with score above threshold
+            confidence = min(0.99, 0.5 + 0.1 * (normalized_score - calibrated_threshold))
+        else:
+            # Clean: confidence increases with score below threshold
+            confidence = min(0.99, 0.5 + 0.1 * (calibrated_threshold - normalized_score))
+        
+        logger.info(
+            f"Detection result: raw_log_odds={raw_log_odds:.4f}, "
+            f"normalized_score={normalized_score:.4f}, "
+            f"threshold={calibrated_threshold:.4f}, "
+            f"detected={detected}"
+        )
         
         # Get latent shape for result
         latent_shape = tuple(z_T.shape[1:]) if z_T.dim() == 4 else tuple(z_T.shape)
         
         return DetectionResult(
             detected=detected,
-            score=float(score),  # log_odds is the score
-            confidence=float(posterior),  # Use posterior directly as confidence
-            log_odds=float(log_odds),
-            posterior=float(posterior),
+            score=float(normalized_score),  # Return normalized score
+            confidence=float(confidence),
+            log_odds=float(raw_log_odds),  # Keep raw log-odds for debugging
+            posterior=float(posterior),  # Keep posterior for reference
             latent_shape=latent_shape,
         )
     

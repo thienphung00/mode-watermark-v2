@@ -35,6 +35,8 @@ class Config:
     # Artifacts settings
     artifacts_path: str = "./data/artifacts"
     likelihood_params_path: Optional[str] = None
+    normalization_params_path: Optional[str] = None
+    calibration_params_path: Optional[str] = None
     mask_path: Optional[str] = None
     
     # Security
@@ -59,6 +61,8 @@ class Config:
             
             artifacts_path=os.getenv("ARTIFACTS_PATH", "./data/artifacts"),
             likelihood_params_path=os.getenv("LIKELIHOOD_PARAMS_PATH"),
+            normalization_params_path=os.getenv("NORMALIZATION_PARAMS_PATH"),
+            calibration_params_path=os.getenv("CALIBRATION_PARAMS_PATH"),
             mask_path=os.getenv("MASK_PATH"),
             
             encryption_key=os.getenv("ENCRYPTION_KEY", "development-key-not-for-production"),
