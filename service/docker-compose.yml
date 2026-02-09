@@ -24,7 +24,7 @@ services:
       - CALIBRATION_PARAMS_PATH=/app/experiments/calibration_098.json
     volumes:
       - ./data:/app/data
-      - ../experiments:/app/experiments:ro
+      - /app/experiments:/app/experiments:ro
     depends_on:
       gpu:
         condition: service_healthy
@@ -60,7 +60,7 @@ services:
       retries: 3
       start_period: 180s  # Models take time to load
     volumes:
-      - ../experiments:/app/experiments:ro
+      - /app/experiments:/app/experiments:ro
     restart: unless-stopped
 
 # For development without GPU, use this alternative:
