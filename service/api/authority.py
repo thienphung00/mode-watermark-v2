@@ -146,12 +146,11 @@ class Authority:
     _g_field_config_loaded: bool = False
     
     # Default inversion configuration
-    # NOTE: guidance_scale MUST be 1.0 for DDIM inversion (unconditional).
-    # DDIMInverter.invert() rejects any other value. The YAML's
-    # diffusion.guidance_scale (7.5) is for generation CFG only.
+    # NOTE: Keep this aligned with the train–detect pipeline to avoid
+    # distribution shift between precompute/training and API detection.
     DEFAULT_INVERSION_CONFIG = {
         "num_inference_steps": 50,
-        "guidance_scale": 1.0,
+        "guidance_scale": 7.5,
     }
     
     @classmethod

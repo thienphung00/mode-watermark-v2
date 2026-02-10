@@ -44,6 +44,7 @@ class DetectionResult:
     """Result from detection."""
     detected: bool
     score: float
+    threshold: float
     confidence: float
     log_odds: float
     posterior: float
@@ -375,6 +376,7 @@ class GPUPipeline:
         return DetectionResult(
             detected=detected,
             score=float(score),
+            threshold=0.5,
             confidence=float(confidence),
             log_odds=float(log_odds),
             posterior=float(posterior),
@@ -627,6 +629,7 @@ class GPUPipeline:
         return DetectionResult(
             detected=detected,
             score=float(normalized_score),  # Return normalized score
+            threshold=float(calibrated_threshold),
             confidence=float(confidence),
             log_odds=float(raw_log_odds),  # Keep raw log-odds for debugging
             posterior=float(posterior),  # Keep posterior for reference

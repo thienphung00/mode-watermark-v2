@@ -123,19 +123,9 @@ class DetectResponse(BaseModel):
     detected: bool = Field(..., description="Whether watermark was detected")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence")
     key_id: str = Field(..., description="Key ID checked")
-    score: float = Field(..., description="Raw detection score")
+    score: float = Field(..., description="Detection score (normalized)")
     threshold: float = Field(..., description="Threshold used for decision")
     processing_time_ms: float = Field(..., description="Processing time in milliseconds")
-    
-    # Additional statistics (optional)
-    posterior: Optional[float] = Field(
-        default=None,
-        description="Bayesian posterior probability"
-    )
-    log_odds: Optional[float] = Field(
-        default=None,
-        description="Log odds ratio"
-    )
 
 
 # =============================================================================
@@ -210,6 +200,7 @@ class GPUDetectResponse(BaseModel):
     
     detected: bool
     score: float
+    threshold: float
     confidence: float
     log_odds: float
     posterior: float

@@ -122,10 +122,9 @@ Response:
 ```json
 {
   "detected": true,
-  "confidence": 0.95,
   "key_id": "wm_abc123def4",
-  "score": 3.45,
-  "threshold": 0.5,
+  "score": 1.8,
+  "threshold": 0.0,
   "processing_time_ms": 2341.2
 }
 ```

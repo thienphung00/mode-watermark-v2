@@ -269,7 +269,7 @@ Each endpoint includes:
 - `KeyRegisterRequest/Response` - Key registration
 - `KeyInfo`, `KeyListResponse` - Key listing
 - `GenerateRequest/Response` - Image generation (with inference params)
-- `DetectRequest/Response` - Watermark detection (with posterior, log_odds)
+- `DetectRequest/Response` - Watermark detection (single normalized score + threshold)
 - `HealthResponse` - Service health
 - `ErrorResponse` - Standard error format
 
@@ -576,12 +576,12 @@ Models for GPU-API communication:
 5. GPU Pipeline:
    a. DDIM inversion → recover latents (z_T)
    b. Compute G-values using master_key
-   c. Apply mask and binarize g-values
-   d. Run BayesianDetector → log_odds, posterior
+   c. Run BayesianDetector → raw log_odds and posterior
+   d. Normalize log-odds and apply calibrated threshold for detection
    
-6. GPU → API: {detected, score, confidence, posterior, log_odds}
+6. GPU → API: {detected, score, threshold, confidence, log_odds, posterior}
    
-7. Client ← {detected, confidence, score, posterior, log_odds}
+7. Client ← {detected, score, threshold, key_id, processing_time_ms}
 ```
 
 ---

@@ -86,7 +86,8 @@ class ReverseDDIMResponse(BaseModel):
     """Response from DDIM inversion."""
     
     detected: bool = Field(..., description="Whether watermark was detected")
-    score: float = Field(..., description="Detection score")
+    score: float = Field(..., description="Normalized detection score")
+    threshold: float = Field(..., description="Deployment threshold in score units")
     confidence: float = Field(..., description="Detection confidence")
     log_odds: float = Field(..., description="Log odds ratio")
     posterior: float = Field(..., description="Bayesian posterior")

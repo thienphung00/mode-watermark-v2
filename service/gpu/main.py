@@ -212,10 +212,11 @@ async def reverse_ddim(request: ReverseDDIMRequest) -> ReverseDDIMResponse:
             f"detected={result.detected}, score={result.score:.3f}, "
             f"time={processing_time_ms:.1f}ms"
         )
-        
+
         return ReverseDDIMResponse(
             detected=result.detected,
             score=result.score,
+            threshold=result.threshold,
             confidence=result.confidence,
             log_odds=result.log_odds,
             posterior=result.posterior,
