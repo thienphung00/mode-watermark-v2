@@ -52,10 +52,12 @@ def load_per_image_scores_by_family(results_dir: Path) -> Dict[str, List[Dict[st
 
 def compute_normalization_for_family(
     per_image: List[Dict[str, Any]],
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
-    Compute mean and std of log_odds over clean (label==0) samples.
-    Uses all transforms (no per-transform stats; family-level only).
+    Compute robust location and scale of log_odds over clean (label==0) samples.
+    Uses median and MAD (median absolute deviation) for outlier resistance.
+    Output keys "mean" and "std" are kept for backward compatibility (consumers
+    use them unchanged); values are median and 1.4826*MAD respectively.
     """
     clean_scores = [
         float(e["log_odds"])
@@ -63,13 +65,26 @@ def compute_normalization_for_family(
         if e.get("label", 1) == 0
     ]
     if not clean_scores:
-        return {"mean": 0.0, "std": 1.0, "n_clean": 0}
+        return {
+            "mean": 0.0,
+            "std": 1.0,
+            "n_clean": 0,
+            "normalization_method": "robust_median_mad",
+        }
     arr = np.array(clean_scores)
-    mean = float(np.mean(arr))
-    std = float(np.std(arr))
-    if std <= 0:
-        std = 1.0
-    return {"mean": mean, "std": std, "n_clean": len(clean_scores)}
+    median = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - np.median(arr))))
+    robust_std = 1.4826 * mad  # Scale MAD to match Gaussian std
+    if robust_std <= 0:
+        robust_std = float(np.std(arr))
+    if robust_std <= 0:
+        robust_std = 1.0
+    return {
+        "mean": median,
+        "std": robust_std,
+        "n_clean": len(clean_scores),
+        "normalization_method": "robust_median_mad",
+    }
 
 
 def normalize_score(score: float, mean: float, std: float) -> float:

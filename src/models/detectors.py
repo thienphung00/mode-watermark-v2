@@ -228,7 +228,7 @@ class BayesianDetector(nn.Module):
     """
     
     # Minimum standard deviation floor for Gaussian likelihood (prevents numerical issues)
-    GAUSSIAN_STD_FLOOR = 1e-3
+    GAUSSIAN_STD_FLOOR = 1e-2
 
     def __init__(
         self,
@@ -271,6 +271,7 @@ class BayesianDetector(nn.Module):
         # Initialize likelihood parameters (will be set during load)
         self.mapping_mode = "binary"  # Default, will be overridden by loaded params
         self.likelihood_type = "bernoulli"  # Default, will be overridden by loaded params
+        self.std_floor = self.GAUSSIAN_STD_FLOOR  # Overridden from JSON for Gaussian models
         
         # Load trained parameters
         if likelihood_params_path is not None:
@@ -357,6 +358,7 @@ class BayesianDetector(nn.Module):
             )
             self.probs_watermarked = None
             self.probs_unwatermarked = None
+            self.std_floor = float(data.get("std_floor", self.GAUSSIAN_STD_FLOOR))
             
         else:
             raise ValueError(
@@ -636,9 +638,9 @@ class BayesianDetector(nn.Module):
         # Get means and stds
         if self.use_trained and self.means_watermarked is not None:
             means_w = self.means_watermarked.to(device)  # [N]
-            stds_w = self.stds_watermarked.to(device).clamp(min=self.GAUSSIAN_STD_FLOOR)  # [N]
+            stds_w = self.stds_watermarked.to(device).clamp(min=self.std_floor)  # [N]
             means_u = self.means_unwatermarked.to(device)  # [N]
-            stds_u = self.stds_unwatermarked.to(device).clamp(min=self.GAUSSIAN_STD_FLOOR)  # [N]
+            stds_u = self.stds_unwatermarked.to(device).clamp(min=self.std_floor)  # [N]
         else:
             # Default: standard normal
             means_w = torch.zeros(N, device=device)

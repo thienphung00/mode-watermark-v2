@@ -85,7 +85,7 @@ class TestGValuesMappingMode:
         )
         g_flat = g.flatten()
         assert g_flat.numel() > 0
-        assert torch.unique(g_flat).numel() >> 2
+        assert torch.unique(g_flat).numel() > 100
 
     def test_binary_mode_unchanged_backward_compat(self):
         """Binary mode behavior unchanged: sign agreement -> {0,1}."""
