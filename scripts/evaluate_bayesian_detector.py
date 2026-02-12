@@ -428,6 +428,7 @@ def evaluate_bayesian_detector(
     likelihood_params_path: str,
     log_odds_threshold: float = 0.0,
     fixed_fpr: Optional[float] = None,
+    method: str = "worst_case_safe",
     plot_roc: bool = False,
     output_dir: Optional[Path] = None,
     inversion_steps: int = 25,
@@ -445,7 +446,8 @@ def evaluate_bayesian_detector(
         manifest_path: Path to g-manifest.jsonl file
         likelihood_params_path: Path to trained likelihood parameters
         log_odds_threshold: Detection threshold in log-odds space (default: 0.0)
-        fixed_fpr: If set, override threshold by ROC point closest to this FPR
+        fixed_fpr: If set, override threshold by ROC point closest to this FPR (required for expected_tpr)
+        method: Threshold selection method (worst_case_safe, expected_tpr, roc_closest_fpr, fixed_threshold)
         plot_roc: Whether to generate and save ROC curve plot (diagnostics only)
         output_dir: Directory to save results (default: same as manifest parent)
         inversion_steps: Number of inversion steps (for logging/plotting)
@@ -501,7 +503,10 @@ def evaluate_bayesian_detector(
     
     if len(entries) == 0:
         raise ValueError(f"Manifest is empty: {manifest_path}")
-    
+
+    if method == "expected_tpr" and fixed_fpr is None:
+        raise ValueError("--method expected_tpr requires --fixed-fpr")
+
     # Validate g-manifest
     first_entry = entries[0]
     assert "g_path" in first_entry, \
@@ -661,20 +666,30 @@ def evaluate_bayesian_detector(
     fpr, tpr, thresholds = compute_roc_curve(scores_array, labels_array)
     auc = compute_auc(fpr, tpr)
 
-    # Choose evaluation threshold: calibrated (worst-case-safe) or fixed-fpr or fixed value
+    # Choose evaluation threshold by method
     threshold_source = "fixed_log_odds_threshold"
     achieved_fpr_from_roc = None
     achieved_fpr_roc_index = None
     target_fpr = None
 
-    if calibration_path is not None and family_id is not None and calibration_path.exists():
-        with open(calibration_path, "r") as f:
-            cal_by_family = json.load(f)
-        cal = cal_by_family.get(family_id, {})
-        log_odds_threshold = float(cal.get("deployment_threshold", log_odds_threshold))
-        threshold_source = "calibrated_worst_case_safe"
-        target_fpr = cal.get("target_fpr")
-    elif fixed_fpr is not None:
+    if method == "worst_case_safe":
+        if calibration_path is not None and family_id is not None and calibration_path.exists():
+            with open(calibration_path, "r") as f:
+                cal_by_family = json.load(f)
+            cal = cal_by_family.get(family_id, {})
+            log_odds_threshold = float(cal.get("deployment_threshold", log_odds_threshold))
+            threshold_source = "calibrated_worst_case_safe"
+            target_fpr = cal.get("target_fpr")
+        # else: keep log_odds_threshold and threshold_source "fixed_log_odds_threshold"
+    elif method == "expected_tpr":
+        target_fpr = float(fixed_fpr)
+        idx = int(np.argmin(np.abs(fpr - target_fpr)))
+        selected_threshold = float(thresholds[idx])
+        achieved_fpr_from_roc = float(fpr[idx])
+        achieved_fpr_roc_index = idx
+        log_odds_threshold = selected_threshold
+        threshold_source = "expected_tpr"
+    elif method == "roc_closest_fpr":
         target_fpr = float(fixed_fpr)
         selected_threshold, achieved_fpr_from_roc, achieved_fpr_roc_index = find_threshold_at_fpr(
             fpr=fpr,
@@ -683,6 +698,11 @@ def evaluate_bayesian_detector(
         )
         log_odds_threshold = float(selected_threshold)
         threshold_source = "roc_closest_fpr"
+    elif method == "fixed_threshold":
+        # Use provided log_odds_threshold unchanged
+        threshold_source = "fixed_log_odds_threshold"
+    else:
+        raise ValueError(f"Unknown threshold method: {method}")
 
     # Apply threshold and compute metrics at this operating point
     predictions_array = (scores_array > float(log_odds_threshold)).astype(int)
@@ -690,6 +710,7 @@ def evaluate_bayesian_detector(
     metrics["auc"] = auc
     metrics["log_odds_threshold"] = float(log_odds_threshold)
     metrics["threshold_source"] = threshold_source
+    metrics["threshold_method"] = method
 
     # Per-transform and worst-case TPR (after metrics so we can use metrics in fallback)
     transforms = [row["transform"] for row in detailed_results]
@@ -792,6 +813,7 @@ def evaluate_bayesian_detector(
         "latent_type": latent_type,
         "log_odds_threshold": log_odds_threshold,
         "threshold_source": threshold_source,
+        "threshold_method": method,
         "target_fpr": target_fpr,
         "achieved_fpr": metrics.get("achieved_fpr", None),
         "auc": auc,
@@ -871,7 +893,15 @@ def main():
         default=None,
         help="If set, override --log-odds-threshold by selecting the ROC threshold closest to this target FPR",
     )
-    
+
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="worst_case_safe",
+        choices=["worst_case_safe", "expected_tpr", "roc_closest_fpr", "fixed_threshold"],
+        help="Threshold selection method",
+    )
+
     parser.add_argument(
         "--plot-roc",
         action="store_true",
@@ -881,8 +911,8 @@ def main():
     parser.add_argument(
         "--inversion-steps",
         type=int,
-        default=25,
-        help="Number of inversion steps (for logging/plotting, default: 25)",
+        default=50,
+        help="Number of inversion steps (for logging/plotting, default: 50)",
     )
     
     parser.add_argument(
@@ -911,11 +941,21 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
+    # Backward compatibility: when method is default (worst_case_safe), infer from other args
+    calibration_path = Path(args.calibration) if args.calibration else None
+    if args.method == "worst_case_safe" and calibration_path is None:
+        effective_method = "roc_closest_fpr" if args.fixed_fpr is not None else "fixed_threshold"
+    else:
+        effective_method = args.method
+
+    if effective_method == "expected_tpr" and args.fixed_fpr is None:
+        raise ValueError("--method expected_tpr requires --fixed-fpr")
+
     print("=" * 60)
     print("Bayesian Detector Controlled Evaluation")
     print("=" * 60)
-    
+
     # Validate paths
     manifest_path = Path(args.g_manifest)
     if not manifest_path.exists():
@@ -934,11 +974,12 @@ def main():
         output_dir = manifest_path.parent
     
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"\nConfiguration:")
     print(f"  G-manifest: {manifest_path}")
     print(f"  Likelihood params: {likelihood_params_path}")
     print(f"  Output directory: {output_dir}")
+    print(f"  Method: {effective_method}")
     print(f"  Log-odds threshold: {args.log_odds_threshold}")
     print(f"  Fixed FPR: {args.fixed_fpr}")
     print(f"  Plot ROC: {args.plot_roc}")
@@ -952,12 +993,13 @@ def main():
         likelihood_params_path=str(likelihood_params_path),
         log_odds_threshold=args.log_odds_threshold,
         fixed_fpr=args.fixed_fpr,
+        method=effective_method,
         plot_roc=args.plot_roc,
         output_dir=output_dir,
         inversion_steps=args.inversion_steps,
         latent_type=args.latent_type,
         normalization_path=Path(args.normalization) if args.normalization else None,
-        calibration_path=Path(args.calibration) if args.calibration else None,
+        calibration_path=calibration_path,
         family_id=args.family_id,
     )
     
@@ -966,9 +1008,9 @@ def main():
     print("Evaluation Results")
     print("=" * 60)
     print(f"Total samples: {metrics['total']}")
-    if args.fixed_fpr is not None:
+    if metrics.get("target_fpr") is not None:
         print("\nFixed-FPR Operating Point:")
-        print(f"  Target FPR:   {metrics.get('target_fpr', float(args.fixed_fpr)):.4f}")
+        print(f"  Target FPR:   {metrics['target_fpr']:.4f}")
         if metrics.get("achieved_fpr", None) is not None:
             print(f"  Achieved FPR: {float(metrics['achieved_fpr']):.4f}")
         print(f"  Threshold:    {metrics['log_odds_threshold']:.6f} (source: {metrics.get('threshold_source')})")
@@ -996,6 +1038,7 @@ def main():
     print(f"  Watermarked mean:   {metrics['score_mean_watermarked']:.4f} ± {metrics['score_std_watermarked']:.4f}")
     print(f"  Unwatermarked mean: {metrics['score_mean_unwatermarked']:.4f} ± {metrics['score_std_unwatermarked']:.4f}")
     print(f"\nExperiment Hygiene:")
+    print(f"  Threshold method: {evaluation_info.get('threshold_method', 'N/A')}")
     print(f"  Average N_eff: {evaluation_info['avg_n_eff']:.1f}")
     print(f"  G-field config hash: {evaluation_info.get('g_field_config_hash', 'N/A')}")
     print(f"  Inversion steps (from precomputed G-values): {evaluation_info['inversion_steps']}")

@@ -61,7 +61,7 @@ from torch.utils.data import Dataset, DataLoader
 # Constants
 # ==============================================================================
 # Minimum standard deviation floor for Gaussian likelihood to prevent numerical issues
-GAUSSIAN_STD_FLOOR = 1e-3
+GAUSSIAN_STD_FLOOR = 1e-2
 
 
 # ==============================================================================
@@ -482,6 +482,7 @@ def train_likelihood_models(
     early_stop: bool = False,
     patience: int = 5,
     min_delta: float = 1e-4,
+    std_floor: float = GAUSSIAN_STD_FLOOR,
 ) -> Tuple[nn.Module, nn.Module]:
     """
     Train two likelihood models: P(g | watermarked) and P(g | unwatermarked).
@@ -514,8 +515,8 @@ def train_likelihood_models(
         model_u = GValueLikelihoodModel(num_positions).to(device)
         likelihood_type = "bernoulli"
     elif mapping_mode == "continuous":
-        model_w = GaussianLikelihoodModel(num_positions).to(device)
-        model_u = GaussianLikelihoodModel(num_positions).to(device)
+        model_w = GaussianLikelihoodModel(num_positions, std_floor=std_floor).to(device)
+        model_u = GaussianLikelihoodModel(num_positions, std_floor=std_floor).to(device)
         likelihood_type = "gaussian"
     else:
         raise ValueError(f"Invalid mapping_mode: {mapping_mode}")
@@ -664,6 +665,127 @@ def train_likelihood_models(
     return model_w, model_u
 
 
+def train_likelihood_models_mle(
+    train_loader: DataLoader,
+    num_positions: int,
+    mapping_mode: str = "binary",
+    device: str = "cpu",
+    std_floor: float = GAUSSIAN_STD_FLOOR,
+) -> Tuple[nn.Module, nn.Module]:
+    """
+    Train two likelihood models using closed-form MLE (no SGD).
+
+    For Gaussian: mu_i = mean(g_i), sigma_i^2 = var(g_i) per position per class.
+    For Bernoulli: p_i = mean(g_i) per position per class, biases = logit(p_i).
+
+    Args:
+        train_loader: Training data loader (single pass)
+        num_positions: Number of effective g-value positions (N_eff)
+        mapping_mode: "binary" or "continuous"
+        device: Device to place models on
+        std_floor: Minimum std for Gaussian (applied after MLE)
+
+    Returns:
+        Tuple of (watermarked_model, unwatermarked_model)
+    """
+    validate_mapping_mode(mapping_mode)
+
+    # Collect all g-values per class in one pass
+    g_w_list: List[torch.Tensor] = []
+    g_u_list: List[torch.Tensor] = []
+
+    for batch in train_loader:
+        g = batch["g"].to(device)
+        labels = batch["label"].to(device)
+        wm_mask = labels == 1
+        clean_mask = labels == 0
+        if wm_mask.sum() > 0:
+            g_w_list.append(g[wm_mask])
+        if clean_mask.sum() > 0:
+            g_u_list.append(g[clean_mask])
+
+    if not g_w_list:
+        raise ValueError("No watermarked samples in training data")
+    if not g_u_list:
+        raise ValueError("No unwatermarked samples in training data")
+
+    g_w = torch.cat(g_w_list, dim=0)  # [N_w, N_eff]
+    g_u = torch.cat(g_u_list, dim=0)  # [N_u, N_eff]
+
+    if mapping_mode == "binary":
+        model_w = GValueLikelihoodModel(num_positions).to(device)
+        model_u = GValueLikelihoodModel(num_positions).to(device)
+        # Bernoulli MLE: p_i = mean(g_i). Clamp to avoid log(0).
+        eps = 1e-6
+        p_w = g_w.mean(dim=0).clamp(min=eps, max=1.0 - eps)
+        p_u = g_u.mean(dim=0).clamp(min=eps, max=1.0 - eps)
+        # bias = logit(p) = log(p / (1-p))
+        with torch.no_grad():
+            model_w.biases.data = torch.log(p_w / (1.0 - p_w))
+            model_u.biases.data = torch.log(p_u / (1.0 - p_u))
+        print("Training likelihood models (MLE)...")
+        print("  Mapping mode: binary (Bernoulli)")
+        print("  Effective positions (N_eff):", num_positions)
+    elif mapping_mode == "continuous":
+        model_w = GaussianLikelihoodModel(num_positions, std_floor=std_floor).to(device)
+        model_u = GaussianLikelihoodModel(num_positions, std_floor=std_floor).to(device)
+        # Gaussian MLE: mu_i = mean(g_i), sigma_i^2 = var(g_i)
+        mu_w = g_w.mean(dim=0)
+        mu_u = g_u.mean(dim=0)
+        var_w = g_w.var(dim=0, unbiased=False)
+        var_u = g_u.var(dim=0, unbiased=False)
+        # std = max(sqrt(var), std_floor), log_std = log(std)
+        std_w = torch.sqrt(var_w.clamp(min=1e-10)).clamp(min=std_floor)
+        std_u = torch.sqrt(var_u.clamp(min=1e-10)).clamp(min=std_floor)
+        with torch.no_grad():
+            model_w.means.data = mu_w
+            model_w.log_stds.data = torch.log(std_w)
+            model_u.means.data = mu_u
+            model_u.log_stds.data = torch.log(std_u)
+        print("Training likelihood models (MLE)...")
+        print("  Mapping mode: continuous (Gaussian)")
+        print("  Effective positions (N_eff):", num_positions)
+        print("  Std floor:", std_floor)
+    else:
+        raise ValueError(f"Invalid mapping_mode: {mapping_mode}")
+
+    return model_w, model_u
+
+
+def compute_variance_diagnostics(
+    params_watermarked: Dict[str, Any],
+    params_unwatermarked: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Compute per-position variance ratio diagnostics for Gaussian models.
+    Used to assess whether shared-variance assumption is viable.
+
+    Returns:
+        Dict with mean_ratio, median_ratio, std_ratio, fraction_in_08_12, recommendation,
+        or None if not Gaussian.
+    """
+    if params_watermarked.get("likelihood_type") != "gaussian":
+        return None
+    stds_w = np.array(params_watermarked["stds"], dtype=float)
+    stds_u = np.array(params_unwatermarked["stds"], dtype=float)
+    # Avoid division by zero
+    ratio = stds_w / np.maximum(stds_u, 1e-12)
+    mean_ratio = float(np.mean(ratio))
+    median_ratio = float(np.median(ratio))
+    std_ratio = float(np.std(ratio))
+    fraction_in_08_12 = float(np.mean((ratio >= 0.8) & (ratio <= 1.2)))
+    recommendation = (
+        "shared_variance_safe" if fraction_in_08_12 >= 0.8 else "shared_variance_risky"
+    )
+    return {
+        "mean_ratio": mean_ratio,
+        "median_ratio": median_ratio,
+        "std_ratio": std_ratio,
+        "fraction_in_08_12": fraction_in_08_12,
+        "recommendation": recommendation,
+    }
+
+
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(
@@ -772,6 +894,21 @@ def main():
         help="Minimum improvement in validation loss to reset patience counter (only used with --early-stop)",
     )
     
+    parser.add_argument(
+        "--training-method",
+        type=str,
+        default="mle",
+        choices=["mle", "sgd"],
+        help="Training method: mle (closed-form MLE, default) or sgd (Adam optimizer)",
+    )
+    
+    parser.add_argument(
+        "--std-floor",
+        type=float,
+        default=0.01,
+        help="Minimum standard deviation for Gaussian likelihood (prevents numerical issues)",
+    )
+    
     args = parser.parse_args()
     
     # Determine device
@@ -877,18 +1014,28 @@ def main():
         )
     
     # Train models
-    model_w, model_u = train_likelihood_models(
-        train_loader,
-        val_loader,
-        num_positions,
-        mapping_mode=mapping_mode,
-        num_epochs=args.num_epochs,
-        lr=args.lr,
-        device=device,
-        early_stop=args.early_stop,
-        patience=args.patience,
-        min_delta=args.min_delta,
-    )
+    if args.training_method == "mle":
+        model_w, model_u = train_likelihood_models_mle(
+            train_loader,
+            num_positions,
+            mapping_mode=mapping_mode,
+            device=device,
+            std_floor=args.std_floor,
+        )
+    else:
+        model_w, model_u = train_likelihood_models(
+            train_loader,
+            val_loader,
+            num_positions,
+            mapping_mode=mapping_mode,
+            num_epochs=args.num_epochs,
+            lr=args.lr,
+            device=device,
+            early_stop=args.early_stop,
+            patience=args.patience,
+            min_delta=args.min_delta,
+            std_floor=args.std_floor,
+        )
     
     # Save models
     output_dir = Path(args.output_dir)
@@ -914,6 +1061,18 @@ def main():
         "watermarked": params_w,
         "unwatermarked": params_u,
     }
+    if likelihood_type == "gaussian":
+        output_data["std_floor"] = args.std_floor
+        # Variance-ratio diagnostic for shared-variance viability
+        variance_diagnostics = compute_variance_diagnostics(params_w, params_u)
+        if variance_diagnostics is not None:
+            output_data["variance_diagnostics"] = variance_diagnostics
+            print("\nVariance-ratio diagnostic (Gaussian):")
+            print(f"  mean_ratio: {variance_diagnostics['mean_ratio']:.4f}")
+            print(f"  median_ratio: {variance_diagnostics['median_ratio']:.4f}")
+            print(f"  std_ratio: {variance_diagnostics['std_ratio']:.4f}")
+            print(f"  fraction_in_08_12: {variance_diagnostics['fraction_in_08_12']:.4f}")
+            print(f"  recommendation: {variance_diagnostics['recommendation']}")
     
     # CRITICAL: Extract and store key fingerprint from training data
     key_fingerprint = None
