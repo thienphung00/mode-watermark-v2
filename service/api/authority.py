@@ -250,23 +250,32 @@ class Authority:
             "embedding_config": self.DEFAULT_EMBEDDING_CONFIG.copy(),
         }
     
+    @staticmethod
+    def _resolve_artifact_path(path: Optional[str], artifacts_base: str) -> Optional[str]:
+        """Resolve artifact path to absolute so GPU worker can open it (e.g. in Docker)."""
+        if not path:
+            return None
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(os.path.join(artifacts_base, path))
+
     def _get_likelihood_path(self) -> Optional[str]:
-        """Get path to likelihood params file."""
+        """Get path to likelihood params file (absolute for GPU worker)."""
         from service.api.config import get_config
         config = get_config()
-        return config.likelihood_params_path
-    
+        return self._resolve_artifact_path(config.likelihood_params_path, config.artifacts_path)
+
     def _get_normalization_path(self) -> Optional[str]:
-        """Get path to normalization params file."""
+        """Get path to normalization params file (absolute for GPU worker)."""
         from service.api.config import get_config
         config = get_config()
-        return config.normalization_params_path
-    
+        return self._resolve_artifact_path(config.normalization_params_path, config.artifacts_path)
+
     def _get_calibration_path(self) -> Optional[str]:
-        """Get path to calibration params file."""
+        """Get path to calibration params file (absolute for GPU worker)."""
         from service.api.config import get_config
         config = get_config()
-        return config.calibration_params_path
+        return self._resolve_artifact_path(config.calibration_params_path, config.artifacts_path)
     
     def get_detection_payload(
         self,
@@ -313,7 +322,19 @@ class Authority:
         calibration_params_path = self._get_calibration_path()
         if calibration_params_path is not None:
             detection_config["calibration_params_path"] = calibration_params_path
-        
+
+        # #region agent log
+        try:
+            import os
+            _log_path = os.environ.get("DEBUG_LOG_PATH", "/Users/macos/Downloads/mode-watermarking-restructured/.cursor/debug.log")
+            _p = detection_config.get("normalization_params_path")
+            _abs = _p and (str(_p).startswith("/") or (len(_p) > 1 and _p[1] == ":"))
+            with open(_log_path, "a") as _f:
+                _f.write(__import__("json").dumps({"location": "authority.py:get_detection_payload", "message": "detection_config paths", "data": {"normalization_params_path": _p, "is_absolute": _abs, "likelihood_path": detection_config.get("likelihood_params_path"), "calibration_path": detection_config.get("calibration_params_path")}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "A"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         return {
             "key_id": key_id,
             "master_key": master_key,

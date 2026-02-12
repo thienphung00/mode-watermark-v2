@@ -442,11 +442,21 @@ class GPUPipeline:
         logger.info(f"Loading BayesianDetector from: {likelihood_params_path}")
         logger.info(f"Loading normalization params from: {normalization_params_path}")
         logger.info(f"Loading calibration params from: {calibration_params_path}")
-        
+
+        # #region agent log
+        try:
+            import os
+            _log_path = os.environ.get("DEBUG_LOG_PATH", "/Users/macos/Downloads/mode-watermarking-restructured/.cursor/debug.log")
+            with open(_log_path, "a") as _f:
+                _f.write(__import__("json").dumps({"location": "gpu/pipeline.py:run_bayesian_detection", "message": "GPU opening normalization path", "data": {"normalization_params_path": normalization_params_path, "is_absolute": os.path.isabs(normalization_params_path), "cwd": os.getcwd()}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "B"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
         # Load normalization parameters
         import json
         from pathlib import Path
-        
+
         with open(normalization_params_path, "r") as f:
             normalization_data = json.load(f)
         

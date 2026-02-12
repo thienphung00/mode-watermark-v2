@@ -26,6 +26,7 @@ services:
 
     volumes:
       - ./data:/app/data
+      - ../results:/app/data/artifacts
 
     depends_on:
       gpu:
@@ -51,6 +52,10 @@ services:
       - MODEL_ID=runwayml/stable-diffusion-v1-5
       - DEVICE=cuda
       - STUB_MODE=false
+
+    volumes:
+      - ./data:/app/data
+      - ../results:/app/data/artifacts
 
     deploy:
       resources:
