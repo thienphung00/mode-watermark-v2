@@ -1,6 +1,3 @@
-# Docker Compose for local development
-# Runs API service and GPU worker together
-
 version: '3.8'
 
 services:
@@ -14,27 +11,35 @@ services:
       - API_HOST=0.0.0.0
       - API_PORT=8000
       - GPU_WORKER_URL=http://gpu:8001
-      - STORAGE_BACKEND=local
-      - STORAGE_PATH=/app/data/images
+
+      # Storage
+      - STORAGE_BACKEND=gcs
+      - GCS_BUCKET=mode-watermarking-artifacts-098
+
+      # Artifact file names (NOT full paths)
+      - LIKELIHOOD_PARAMS_PATH=likelihood_params.json
+      - NORMALIZATION_PARAMS_PATH=normalization_098.json
+      - CALIBRATION_PARAMS_PATH=calibration_098_001.json
+
       - KEY_STORE_PATH=/app/data/keys.json
-      - ARTIFACTS_PATH=/app/data/artifacts
       - API_DEBUG=false
-      - LIKELIHOOD_PARAMS_PATH=/app/experiments/likelihood_params.json
-      - NORMALIZATION_PARAMS_PATH=/app/experiments/normalization_098.json
-      - CALIBRATION_PARAMS_PATH=/app/experiments/calibration_098.json
+
     volumes:
       - ./data:/app/data
-      - /app/experiments:/app/experiments:ro
+
     depends_on:
       gpu:
         condition: service_healthy
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
     restart: unless-stopped
+
 
   gpu:
     build:
@@ -45,7 +50,8 @@ services:
       - GPU_PORT=8001
       - MODEL_ID=runwayml/stable-diffusion-v1-5
       - DEVICE=cuda
-      - STUB_MODE=false  # Set to false for real GPU inference
+      - STUB_MODE=false
+
     deploy:
       resources:
         reservations:
@@ -53,15 +59,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s  # Models take time to load
-    volumes:
-      - /app/experiments:/app/experiments:ro
-    restart: unless-stopped
+      start_period: 180s
 
-# For development without GPU, use this alternative:
-# docker-compose -f docker-compose.yml -f docker-compose.stub.yml up
+    restart: unless-stopped
